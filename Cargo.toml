@@ -1,0 +1,20 @@
+[package]
+name = "pek-rredis"
+version = "0.1.0"
+edition = "2024"
+description = "Pek.RRedis：DH.NRedis 的 Rust 实现——RESP2/RESP3 协议、数据结构与消息队列，与 C# 端数据互通（同一 Redis 实例互读互写），服务 C# 项目向 Rust 的渐进迁移与替换"
+authors = ["PeiKeSmart"]
+license = "MIT"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+
+[profile.release]
+lto = "thin"
+strip = true
