@@ -27,7 +27,7 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | `pool` | `ObjectPool<RedisClient>` | ✅ Min/Max/IdleTime/MaxLifetime/WaitTimeout，空闲 PING 健康检查 |
 | `encoder` | `RedisJsonEncoder` / `DefaultPacketEncoder` | ✅ 字节格式逐条对齐（见下表） |
 | `redis`（基础命令） | `Redis` | ✅ 字符串/键/过期/位图/`BITFIELD`/批量/服务器信息（`ServerType`/`Version` 探测与 `require_version` 门禁）/脚本/管道 |
-| `full` | `FullRedis` | ✅ 前缀（含基础命令前缀包装）、SCAN 搜索、模式删除、Eval/FCall、分布式锁、RedLock、结构工厂 |
+| `full` | `FullRedis` | ✅ 前缀（含基础命令与便利公开面前缀包装：`SetAll`/`SetGet`/`BitOp`/`Copy`/`MemoryUsage`/`ObjectEncoding`/`LPUSH`/`RPUSH`/`SADD`/`SREM`/`LPOS`/阻塞 `BLPOP`/`BRPOP`）、SCAN 搜索、模式删除、Eval/FCall、分布式锁、RedLock、结构工厂 |
 | `RedisHash` / `RedisList` / `RedisSet` / `RedisSortedSet` / `RedisStack` | 同名 | ✅ 全量命令对齐（含 `HGETDEL`/`HGETEX`、`LMOVE`/`BLMOVE`/`LMPOP`、`SMISMEMBER`/`SINTERCARD`、`ZUNION/ZINTER/ZDIFF` 族、`ZRANGESTORE`、`ZMPOP`/`BZPOPMIN/MAX`） |
 | `RedisGeo` / `HyperLogLog` | 同名 | ✅ 常用命令 |
 | `PubSub` | `PubSub` | ✅ 订阅/模式订阅/分片订阅/自省 |
@@ -41,18 +41,18 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | `RedisEventBus` / ASP.NET 集成（`RedisCacheProvider`/`RedisStat`/`RedisDeferred`/`CacheExtensions`） | `Services` | ➖ 不迁移（.NET 运行时专属，见审计说明） |
 | 异步 API | `*Async` | 🚧 规划中（当前同步阻塞 + 线程/`spawn_blocking`） |
 
-测试：**103 项**（53 单元 + 46 进程内端到端（25 互通 + 21 审计）+ 4 文档；另有 5 项真实 Redis 可选），
+测试：**104 项**（53 单元 + 47 进程内端到端（25 互通 + 22 审计）+ 4 文档；另有 5 项真实 Redis 可选），
 `cargo test` 离线全绿，`cargo clippy --all-targets` 零告警；另有 C#/Rust 两个可执行 Demo 做交叉验证（见第四节）。
 
 ### 与 C# 全量 API 审计（2026-09-26 复核）
 
 对 DH.NRedis 全部 public 方法逐项核对（`Redis`/`FullRedis`/各结构体/队列/`Services`/`Clusters`），结论：
 
-- ✅ **命令级能力已全部对齐并测试**：本轮补齐 `GETEX`、`EXPIRETIME`/`PEXPIRETIME`、`OBJECT IDLETIME`/`FREQ`、`BITFIELD`、
+- ✅ **命令级能力与 `FullRedis` 便利公开面已全部对齐并测试**：本轮补齐 `GETEX`、`EXPIRETIME`/`PEXPIRETIME`、`OBJECT IDLETIME`/`FREQ`/`ENCODING`、`BITFIELD`/`BITOP`、
   `HGETDEL`/`HGETEX`、`LMOVE`/`BLMOVE`/`LMPOP`/多键 `BRPOP`/`BLPOP`、`SMISMEMBER`/`SINTERCARD`、`ZMSCORE`/`ZRANDMEMBER`/
   `ZRANGESTORE`/`ZDIFF(STORE)`/`ZUNION(STORE)`/`ZINTER(STORE)`（含 `WEIGHTS`/`AGGREGATE`/`WITHSCORES`）/`ZMPOP`/`BZPOPMIN`/`BZPOPMAX`、
   `SWAPDB`/`WAIT`/`SLOWLOG`/`LATENCY`/`REPLICAOF`、`FUNCTION LOAD/LIST/DELETE` 与 `FCALL`/`FCALL_RO`、
-  `ServerType`/`Version` 探测、`FullRedis` 基础命令前缀包装、`RedisRedLock`、`consume_json`/`consume_raw`、Tair `Ex*`。
+  `ServerType`/`Version` 探测、`FullRedis` 基础命令与便利公开面前缀层（含 `SetAll`/`SetGet`/`Copy`/`MemoryUsage`/`LPUSH`/`RPUSH`/`SADD`/`SREM`/`LPOS`/单键阻塞 `BLPOP`/`BRPOP`）、`RedisRedLock`、`consume_json`/`consume_raw`、Tair `Ex*`。
 - ➖ **明确不迁移（.NET 生态专属，与数据格式无关）**：`Bench`、`WriteLog`、`RedisCacheProvider`（ASP.NET `ICacheProvider`）、
   `RedisEventBus`、`RedisStat`、`RedisDeferred`、`CacheExtensions`、DI 扩展；`Tracer`/`Counter` 由 `QueueSettings::trace` 等效覆盖。
 - 🚧 **已知未实现**：Cluster/Sentinel/Replication、TLS、异步 API（见路线图）。

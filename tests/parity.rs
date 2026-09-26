@@ -72,6 +72,57 @@ fn bit_field_roundtrip() {
     assert_eq!(rs, vec![0, -1]);
 }
 
+#[test]
+fn fullredis_convenience_wrappers_apply_prefixes() {
+    let server = start_mock_redis();
+    let redis = FullRedis::from_config(&format!("server={};db=0;prefix=app:", server.addr)).unwrap();
+
+    assert!(redis.set("setget", "old", 0).unwrap());
+    let old: Option<String> = redis.set_get("setget", "new".to_string(), 30).unwrap();
+    assert_eq!(old.as_deref(), Some("old"));
+    assert_eq!(raw_get(&server, "app:setget").as_deref(), Some(&b"new"[..]));
+
+    redis
+        .set_all(&[("bulk:a", "1"), ("bulk:b", "2")], 60)
+        .unwrap();
+    assert_eq!(raw_get(&server, "app:bulk:a").as_deref(), Some(&b"1"[..]));
+    let bulk = redis.get_all::<String>(&["bulk:a", "bulk:b"]).unwrap();
+    assert_eq!(bulk.get("bulk:b").map(|value| value.as_str()), Some("2"));
+
+    assert_eq!(redis.rpush("list", &["b", "c"]).unwrap(), 2);
+    assert_eq!(redis.lpush("list", &["a"]).unwrap(), 3);
+    assert_eq!(list_len(&server, "app:list"), 3);
+    assert_eq!(redis.lpos("list", "c", 0, 0, 0).unwrap(), vec![2]);
+    assert_eq!(redis.lpos("list", "a", 0, 1, 0).unwrap(), vec![0]);
+    assert_eq!(redis.brpop::<String>("list", 1).unwrap().as_deref(), Some("c"));
+    assert_eq!(redis.blpop::<String>("list", 1).unwrap().as_deref(), Some("a"));
+
+    assert_eq!(redis.sadd("set", &["x", "y", "x"]).unwrap(), 2);
+    assert_eq!(redis.srem("set", &["y"]).unwrap(), 1);
+    assert!(redis.sismember("set", &"x".to_string()).unwrap());
+    assert!(!redis.sismember("set", &"y".to_string()).unwrap());
+
+    let hash = redis.get_hash::<String>("hash");
+    hash.set(&"f1".to_string(), &"v1".to_string()).unwrap();
+    hash.set(&"f2".to_string(), &"v2".to_string()).unwrap();
+    let all = redis.get_hash_all::<String>("hash").unwrap();
+    assert_eq!(all.get("f1").map(|value| value.as_str()), Some("v1"));
+
+    assert!(redis.copy("setget", "setget:copy", None, false).unwrap());
+    assert_eq!(raw_get(&server, "app:setget:copy").as_deref(), Some(&b"new"[..]));
+    assert!(!redis.copy("setget", "setget:copy", None, false).unwrap());
+    assert!(redis.copy("setget", "setget:copy", None, true).unwrap());
+
+    let mem = redis.memory_usage("setget", 0).unwrap();
+    assert!(mem.unwrap_or_default() > 0);
+    assert_eq!(redis.object_encoding("setget").unwrap().as_deref(), Some("embstr"));
+
+    assert!(redis.set("bits:a", vec![0b1010_0000u8], 0).unwrap());
+    assert!(redis.set("bits:b", vec![0b1100_0000u8], 0).unwrap());
+    assert_eq!(redis.bit_op("OR", "bits:or", &["bits:a", "bits:b"]).unwrap(), 1);
+    assert_eq!(raw_get(&server, "app:bits:or").as_deref(), Some(&[0b1110_0000][..]));
+}
+
 // ==================== 哈希扩展 ====================
 
 #[test]

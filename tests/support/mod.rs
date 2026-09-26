@@ -429,7 +429,32 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
                 .collect();
             (array(vec![bulk(b"0"), array(keys.iter().map(|k| bulk(k)).collect())]), false)
         }
+        "COPY" => {
+            let source = args[1].clone();
+            let destination = args[2].clone();
+            let replace = args.iter().any(|arg| arg.eq_ignore_ascii_case(b"REPLACE"));
+            let entry = match store.get_live(&source).cloned() {
+                Some(entry) => entry,
+                None => return (int(0), false),
+            };
+            if !replace && store.get_live(&destination).is_some() {
+                (int(0), false)
+            } else {
+                store.data.insert(destination, entry);
+                (int(1), false)
+            }
+        }
         "RANDOMKEY" => (nil(), false),
+        "MEMORY" => {
+            if args.len() >= 3 && args[1].eq_ignore_ascii_case(b"USAGE") {
+                match store.get_live(&args[2]).map(|e| &e.value) {
+                    Some(value) => (int(estimate_memory_usage(value) as i64), false),
+                    None => (nil(), false),
+                }
+            } else {
+                (error("ERR unknown MEMORY subcommand"), false)
+            }
+        }
 
         // ---------- 字符串 ----------
         "SET" => dispatch_set(&mut store, args),
@@ -517,6 +542,18 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
             let len = current.len() as i64;
             store.set_str(&args[1], current);
             (int(len), false)
+        }
+        "BITOP" => {
+            let operation = String::from_utf8_lossy(&args[1]).to_uppercase();
+            let destination = args[2].clone();
+            let sources: Vec<Bytes> = args[3..]
+                .iter()
+                .map(|key| store.str_value(key).unwrap_or_default())
+                .collect();
+
+            let result = apply_bitop(&operation, &sources);
+            store.set_str(&destination, result.clone());
+            (int(result.len() as i64), false)
         }
         "STRLEN" => (int(store.str_value(&args[1]).map(|v| v.len()).unwrap_or(0) as i64), false),
         "GETRANGE" => {
@@ -824,13 +861,60 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
             (int(removed), false)
         }
         "LPOS" => {
-            let pos = match store.get_live(&args[1]).map(|e| &e.value) {
-                Some(Value::List(l)) => l.iter().position(|v| v == &args[2]).map(|i| i as i64),
-                _ => None,
+            let rank = args
+                .iter()
+                .position(|arg| arg.eq_ignore_ascii_case(b"RANK"))
+                .and_then(|index| args.get(index + 1))
+                .and_then(|value| parse_i64(value))
+                .unwrap_or(1);
+            let count = args
+                .iter()
+                .position(|arg| arg.eq_ignore_ascii_case(b"COUNT"))
+                .and_then(|index| args.get(index + 1))
+                .and_then(|value| parse_i64(value))
+                .unwrap_or(0);
+            let max_len = args
+                .iter()
+                .position(|arg| arg.eq_ignore_ascii_case(b"MAXLEN"))
+                .and_then(|index| args.get(index + 1))
+                .and_then(|value| parse_i64(value))
+                .unwrap_or(0);
+
+            let positions: Vec<i64> = match store.get_live(&args[1]).map(|e| &e.value) {
+                Some(Value::List(list)) => {
+                    let limit = if max_len > 0 {
+                        max_len.max(0) as usize
+                    } else {
+                        list.len()
+                    };
+                    let iter: Box<dyn Iterator<Item = (usize, &Bytes)>> = if rank < 0 {
+                        Box::new(list.iter().take(limit).enumerate().rev())
+                    } else {
+                        Box::new(list.iter().take(limit).enumerate())
+                    };
+                    let mut all: Vec<i64> = iter
+                        .filter_map(|(index, value)| (value == &args[2]).then_some(index as i64))
+                        .collect();
+                    let skip = rank.unsigned_abs().saturating_sub(1) as usize;
+                    if skip > 0 {
+                        all = all.into_iter().skip(skip).collect();
+                    }
+                    if count > 0 {
+                        all.into_iter().take(count as usize).collect()
+                    } else {
+                        all.into_iter().take(1).collect()
+                    }
+                }
+                _ => Vec::new(),
             };
-            match pos {
-                Some(i) => (int(i), false),
-                None => (nil(), false),
+
+            if count > 0 {
+                (array(positions.into_iter().map(int).collect()), false)
+            } else {
+                match positions.into_iter().next() {
+                    Some(pos) => (int(pos), false),
+                    None => (nil(), false),
+                }
             }
         }
         "LINSERT" => {
@@ -3059,6 +3143,65 @@ fn range_slice(data: &[u8], start: i64, end: i64) -> Vec<u8> {
     } else {
         data[s as usize..=(e as usize)].to_vec()
     }
+}
+
+fn estimate_memory_usage(value: &Value) -> usize {
+    match value {
+        Value::None => 0,
+        Value::Str(bytes) => bytes.len(),
+        Value::List(items) => items.iter().map(|item| item.len()).sum(),
+        Value::Hash(items) => items.iter().map(|(key, value)| key.len() + value.len()).sum(),
+        Value::Set(items) => items.iter().map(|item| item.len()).sum(),
+        Value::ZSet(items) => items
+            .iter()
+            .map(|(member, _)| member.len() + std::mem::size_of::<f64>())
+            .sum(),
+        Value::Stream(stream) => stream
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .fields
+                    .iter()
+                    .map(|(key, value)| key.len() + value.len())
+                    .sum::<usize>()
+            })
+            .sum(),
+    }
+}
+
+fn apply_bitop(operation: &str, sources: &[Bytes]) -> Bytes {
+    if sources.is_empty() {
+        return Vec::new();
+    }
+
+    let max_len = sources.iter().map(|source| source.len()).max().unwrap_or(0);
+    let mut result = vec![0u8; max_len];
+
+    match operation {
+        "NOT" => {
+            let source = &sources[0];
+            for (index, slot) in result.iter_mut().enumerate() {
+                *slot = !source.get(index).copied().unwrap_or(0);
+            }
+        }
+        "AND" | "OR" | "XOR" => {
+            for (index, slot) in result.iter_mut().enumerate() {
+                let mut iter = sources
+                    .iter()
+                    .map(|source| source.get(index).copied().unwrap_or(0));
+                let first = iter.next().unwrap_or(0);
+                *slot = iter.fold(first, |acc, value| match operation {
+                    "AND" => acc & value,
+                    "OR" => acc | value,
+                    _ => acc ^ value,
+                });
+            }
+        }
+        _ => {}
+    }
+
+    result
 }
 
 /// 简易 glob：支持 `*` 与 `?`（字节级匹配）。

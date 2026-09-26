@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 use crate::options::RedisOptions;
 use crate::redis::{Redis, ServerType};
 use crate::resp::RespValue;
-use crate::util::{decode, decode_array, decode_scored, decode_scored_pairs, int_or};
+use crate::util::{decode, decode_array, decode_scored, decode_scored_pairs, int_or, payload};
 
 pub use crate::encoder::{FromRedisPayload, ToRedisPayload};
 use crate::geo::RedisGeo;
@@ -214,6 +214,19 @@ impl FullRedis {
         Ok(dic)
     }
 
+    /// 批量设置（自动补前缀，对应 C# `FullRedis.SetAll`）。
+    pub fn set_all<K, V>(&self, values: &[(K, V)], expire_seconds: i64) -> Result<()>
+    where
+        K: AsRef<str>,
+        V: ToRedisPayload,
+    {
+        let full: Vec<(String, &V)> = values
+            .iter()
+            .map(|(key, value)| (self.get_key(key.as_ref()), value))
+            .collect();
+        self.redis.set_all(&full, expire_seconds)
+    }
+
     // ================== 脚本 ==================
 
     /// 执行 Lua 脚本（`EVAL`）。
@@ -343,6 +356,15 @@ impl FullRedis {
         key: &str,
     ) -> RedisHash<V, K> {
         RedisHash::new(self.clone(), key)
+    }
+
+    /// 获取哈希全部字段（对应 C# `GetHashAll<T>`）。
+    pub fn get_hash_all<V: FromRedisPayload>(&self, key: &str) -> Result<HashMap<String, V>> {
+        let map = self.get_hash::<V>(key).get_all_map()?;
+        Ok(map
+            .into_iter()
+            .filter_map(|(field, value)| value.map(|value| (field, value)))
+            .collect())
     }
 
     /// 列表结构（对应 C# `GetList<T>(key)`）。
@@ -480,6 +502,16 @@ impl FullRedis {
         self.redis.get_expire(&self.get_key(key))
     }
 
+    /// 设置新值并返回旧值（`SET ... GET`，Redis 6.2+，对应 C# `FullRedis.SetGet<T>`）。
+    pub fn set_get<V: FromRedisPayload + ToRedisPayload>(
+        &self,
+        key: &str,
+        value: V,
+        expire_seconds: i64,
+    ) -> Result<Option<V>> {
+        self.redis.set_get(&self.get_key(key), value, expire_seconds)
+    }
+
     /// `APPEND`（对应 C# `FullRedis.Append`）。
     pub fn append(&self, key: &str, value: &str) -> Result<i64> {
         self.redis.append(&self.get_key(key), value)
@@ -518,6 +550,14 @@ impl FullRedis {
     /// 首个置位/清零位（`BITPOS`，对应 C# `FullRedis.BitPos`）。
     pub fn bit_pos(&self, key: &str, bit: i32, start: i64, end: i64) -> Result<i64> {
         self.redis.bit_pos(&self.get_key(key), bit, start, end)
+    }
+
+    /// 多键位运算（`BITOP`，对应 C# `FullRedis.BitOp`）。
+    pub fn bit_op(&self, operation: &str, dest_key: &str, keys: &[&str]) -> Result<i64> {
+        let dest_key = self.get_key(dest_key);
+        let keys: Vec<String> = keys.iter().map(|key| self.get_key(key)).collect();
+        let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+        self.redis.bit_op(operation, &dest_key, &refs)
     }
 
     /// 整数自增（`INCRBY`，对应 C# `FullRedis.Increment`）。
@@ -559,6 +599,32 @@ impl FullRedis {
         self.redis.touch(&refs)
     }
 
+    /// 拷贝键（`COPY`，Redis 6.2+，对应 C# `FullRedis.Copy`）。
+    pub fn copy(
+        &self,
+        source: &str,
+        destination: &str,
+        destination_db: Option<i32>,
+        replace: bool,
+    ) -> Result<bool> {
+        self.redis.copy(
+            &self.get_key(source),
+            &self.get_key(destination),
+            destination_db,
+            replace,
+        )
+    }
+
+    /// 键内存占用（`MEMORY USAGE`，对应 C# `FullRedis.MemoryUsage`）。
+    pub fn memory_usage(&self, key: &str, samples: i32) -> Result<Option<i64>> {
+        self.redis.memory_usage(&self.get_key(key), samples)
+    }
+
+    /// 对象内部编码（`OBJECT ENCODING`，对应 C# `FullRedis.ObjectEncoding`）。
+    pub fn object_encoding(&self, key: &str) -> Result<Option<String>> {
+        self.redis.object_encoding(&self.get_key(key))
+    }
+
     /// 随机键（`RANDOMKEY`，无前缀语义，对应 C# `Redis.RandomKey`）。
     pub fn random_key(&self) -> Result<Option<String>> {
         self.redis.random_key()
@@ -569,14 +635,42 @@ impl FullRedis {
         self.redis.dbsize()
     }
 
+    /// 列表尾部插入（`RPUSH`，对应 C# `FullRedis.RPUSH<T>`）。
+    pub fn rpush<V: ToRedisPayload>(&self, key: &str, values: &[V]) -> Result<i64> {
+        self.push_list_values(b"RPUSH", key, values)
+    }
+
+    /// 列表头部插入（`LPUSH`，对应 C# `FullRedis.LPUSH<T>`）。
+    pub fn lpush<V: ToRedisPayload>(&self, key: &str, values: &[V]) -> Result<i64> {
+        self.push_list_values(b"LPUSH", key, values)
+    }
+
     /// 列表右弹（对应 C# `FullRedis.RPOP<T>`）。
     pub fn rpop<V: FromRedisPayload + ToRedisPayload>(&self, key: &str) -> Result<Option<V>> {
         self.get_list::<V>(key).pop_back()
     }
 
+    /// 列表右阻塞弹（对应 C# `FullRedis.BRPOP<T>(key, timeout)`）。
+    pub fn brpop<V: FromRedisPayload + ToRedisPayload>(
+        &self,
+        key: &str,
+        timeout_seconds: i64,
+    ) -> Result<Option<V>> {
+        self.get_list::<V>(key).pop_back_blocking(timeout_seconds)
+    }
+
     /// 列表左弹（对应 C# `FullRedis.LPOP<T>`）。
     pub fn lpop<V: FromRedisPayload + ToRedisPayload>(&self, key: &str) -> Result<Option<V>> {
         self.get_list::<V>(key).pop_front()
+    }
+
+    /// 列表左阻塞弹（对应 C# `FullRedis.BLPOP<T>(key, timeout)`）。
+    pub fn blpop<V: FromRedisPayload + ToRedisPayload>(
+        &self,
+        key: &str,
+        timeout_seconds: i64,
+    ) -> Result<Option<V>> {
+        self.get_list::<V>(key).pop_front_blocking(timeout_seconds)
     }
 
     /// 右弹并左推（`RPOPLPUSH`，对应 C# `FullRedis.RPOPLPUSH<T>`）。
@@ -596,6 +690,21 @@ impl FullRedis {
         timeout_seconds: i64,
     ) -> Result<Option<V>> {
         self.get_list::<V>(source).brpoplpush(destination, timeout_seconds)
+    }
+
+    fn push_list_values<V: ToRedisPayload>(&self, cmd: &[u8], key: &str, values: &[V]) -> Result<i64> {
+        if values.is_empty() {
+            return Ok(0);
+        }
+
+        let mut args: Vec<Vec<u8>> = Vec::with_capacity(values.len() + 2);
+        args.push(cmd.to_vec());
+        args.push(self.get_key(key).into_bytes());
+        for value in values {
+            args.push(payload(value)?);
+        }
+        let refs: Vec<&[u8]> = args.iter().map(|arg| arg.as_slice()).collect();
+        Ok(int_or(self.redis.execute(&refs)?, 0))
     }
 
     /// 集合全部成员（`SMEMBERS`，对应 C# `FullRedis.SMEMBERS<T>`）。
@@ -643,6 +752,31 @@ impl FullRedis {
         count: i64,
     ) -> Result<Vec<V>> {
         self.get_set::<V>(key).pop(count)
+    }
+
+    /// 集合添加（`SADD`，对应 C# `FullRedis.SADD<T>`）。
+    pub fn sadd<V: ToRedisPayload>(&self, key: &str, members: &[V]) -> Result<i64> {
+        self.batch_set_values(b"SADD", key, members)
+    }
+
+    /// 集合删除（`SREM`，对应 C# `FullRedis.SREM<T>`）。
+    pub fn srem<V: ToRedisPayload>(&self, key: &str, members: &[V]) -> Result<i64> {
+        self.batch_set_values(b"SREM", key, members)
+    }
+
+    fn batch_set_values<V: ToRedisPayload>(&self, cmd: &[u8], key: &str, members: &[V]) -> Result<i64> {
+        if members.is_empty() {
+            return Ok(0);
+        }
+
+        let mut args: Vec<Vec<u8>> = Vec::with_capacity(members.len() + 2);
+        args.push(cmd.to_vec());
+        args.push(self.get_key(key).into_bytes());
+        for member in members {
+            args.push(payload(member)?);
+        }
+        let refs: Vec<&[u8]> = args.iter().map(|arg| arg.as_slice()).collect();
+        Ok(int_or(self.redis.execute(&refs)?, 0))
     }
 
     // ================== 键命令扩展（对齐 C# FullRedis） ==================
@@ -847,6 +981,44 @@ impl FullRedis {
             return Ok(None);
         };
         Ok(items.next().and_then(decode).map(|v| (key, v)))
+    }
+
+    /// 查找列表中元素的位置（`LPOS`，对应 C# `LPos`）。
+    pub fn lpos(
+        &self,
+        key: &str,
+        element: &str,
+        rank: i32,
+        count: i32,
+        max_len: i32,
+    ) -> Result<Vec<i64>> {
+        let key = self.get_key(key);
+        let mut argv: Vec<Vec<u8>> = vec![b"LPOS".to_vec(), key.into_bytes(), element.as_bytes().to_vec()];
+        if rank != 0 {
+            argv.push(b"RANK".to_vec());
+            argv.push(rank.to_string().into_bytes());
+        }
+        if count > 0 {
+            argv.push(b"COUNT".to_vec());
+            argv.push(count.to_string().into_bytes());
+        }
+        if max_len > 0 {
+            argv.push(b"MAXLEN".to_vec());
+            argv.push(max_len.to_string().into_bytes());
+        }
+
+        let refs: Vec<&[u8]> = argv.iter().map(|arg| arg.as_slice()).collect();
+        let rs = self.redis.execute(&refs)?;
+        if count > 0 {
+            Ok(rs
+                .into_array()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| value.as_i64())
+                .collect())
+        } else {
+            Ok(rs.as_i64().map(|value| vec![value]).unwrap_or_default())
+        }
     }
 
     // ================== 集合扩展（对齐 C# FullRedis） ==================
