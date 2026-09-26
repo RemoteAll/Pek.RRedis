@@ -428,11 +428,241 @@ fn distributed_lock_steals_expired_lock_without_misdeleting() {
     assert!(!exists(&server, "lk2"), "B 释放后锁应消失");
 }
 
+// ================== Stream 消息队列（Redis 5.0+） ==================
+
+/// 与 C# `DemoModel` 对应的对象消息（Stream 对象消息按属性名扁平化）。
+/// 注意：Stream 字段路径用编码器文本时间（`yyyy-MM-dd HH:mm:ss.fff`）。
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "PascalCase")]
+struct StreamOrder {
+    code: String,
+    count: i32,
+    #[serde(with = "pek_rredis::encoder::datetime_text")]
+    create_time: NaiveDateTime,
+}
+
+fn sample_time() -> NaiveDateTime {
+    NaiveDateTime::parse_from_str("2026-09-26 10:00:00.123", "%Y-%m-%d %H:%M:%S%.f").unwrap()
+}
+
+#[test]
+fn stream_add_encodes_like_csharp() {
+    let (_server, full) = mock_full();
+    let stream = full.get_stream("stream:enc");
+
+    // 基元 → __data 字段；对象 → 属性名扁平化；数组 → 成对字段
+    assert!(stream.add(&"hello", None).unwrap().is_some());
+    stream.add(&7, None).unwrap();
+    stream.add(&true, None).unwrap();
+    stream
+        .add(
+            &StreamOrder {
+                code: "A-001".into(),
+                count: 3,
+                create_time: sample_time(),
+            },
+            None,
+        )
+        .unwrap();
+    stream.add(&vec!["k1", "v1", "k2", "v2"], None).unwrap();
+
+    let msgs = stream.range(None, None, -1).unwrap();
+    assert_eq!(msgs.len(), 5);
+
+    assert_eq!(msgs[0].body, vec!["__data", "hello"]);
+    assert_eq!(msgs[1].body, vec!["__data", "7"]);
+    assert_eq!(msgs[2].body, vec!["__data", "True"]);
+
+    // 对象消息：字段名 = C# 属性名；时间经编码器写入（保留毫秒）
+    assert_eq!(msgs[3].field("Code"), Some("A-001"));
+    assert_eq!(msgs[3].field("Count"), Some("3"));
+    assert_eq!(msgs[3].field("CreateTime"), Some("2026-09-26 10:00:00.123"));
+
+    assert_eq!(msgs[4].body, vec!["k1", "v1", "k2", "v2"]);
+
+    // 消息 Id 形如 "ms-seq"
+    assert!(msgs[0].id.contains('-'));
+}
+
+#[test]
+fn stream_reads_csharp_style_written_messages() {
+    // 模拟 C# 端对象消息：属性名 + 编码器文本（时间带 .fff），Id 由服务端生成
+    let (_server, full) = mock_full();
+    let stream = full.get_stream("stream:csharp");
+
+    stream
+        .add_fields(
+            &[
+                ("Code".into(), b"A-100".to_vec()),
+                ("Count".into(), b"7".to_vec()),
+                ("CreateTime".into(), b"2026-09-26 10:00:00.123".to_vec()),
+            ],
+            Some("1695792000000-0"),
+            false,
+        )
+        .unwrap();
+
+    let msgs = stream.range(Some("-"), Some("+"), 10).unwrap();
+    assert_eq!(msgs[0].id, "1695792000000-0");
+
+    let order = msgs[0].to_struct::<StreamOrder>().expect("应能映射为结构体");
+    assert_eq!(
+        order,
+        StreamOrder {
+            code: "A-100".into(),
+            count: 7,
+            create_time: sample_time(),
+        }
+    );
+
+    // 非 group 独立消费也能拿到
+    let mut stream2 = full.get_stream("stream:csharp");
+    let bodies = stream2.take_messages(10, 0).unwrap();
+    assert_eq!(bodies.len(), 1);
+}
+
+#[test]
+fn stream_non_group_read_advances_start_id() {
+    let (_server, full) = mock_full();
+    let mut stream = full.get_stream("stream:free");
+
+    stream.add(&"a", None).unwrap();
+    stream.add(&"b", None).unwrap();
+
+    let msgs = stream.take_messages(10, 0).unwrap();
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0].body, vec!["__data", "a"]);
+
+    // 游标已前移，不会重复消费
+    assert!(stream.take_messages(10, 0).unwrap().is_empty());
+
+    stream.add(&"c", None).unwrap();
+    assert_eq!(stream.take_bodies::<String>(10).unwrap(), vec!["c"]);
+}
+
+#[test]
+fn stream_group_consume_ack_and_status() {
+    let (_server, full) = mock_full();
+    let mut stream = full.get_stream("stream:group");
+
+    assert!(stream.set_group("g1").unwrap(), "首次应创建消费组");
+    assert!(!stream.set_group("g1").unwrap(), "已存在则不再创建");
+    assert_eq!(stream.get_groups().unwrap().len(), 1);
+
+    for i in 1..=3 {
+        stream.add(&format!("m-{i}"), None).unwrap();
+    }
+
+    let msgs = stream.take_messages(10, 0).unwrap();
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs.iter().map(|m| m.primitive::<String>()).collect::<Vec<_>>(),
+        vec![Some("m-1".into()), Some("m-2".into()), Some("m-3".into())]);
+
+    // 未确认 → 挂起 3 条，且能查到消费者
+    let pending = stream.pending_info("g1").unwrap().unwrap();
+    assert_eq!(pending.count, 3);
+    assert_eq!(pending.consumers.len(), 1);
+    let consumers = stream.get_consumers("g1").unwrap();
+    assert_eq!(consumers.len(), 1);
+    assert_eq!(consumers[0].pending, 3);
+
+    // 确认后挂起清零
+    let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(stream.acknowledge(&ids).unwrap(), 3);
+    assert_eq!(stream.pending_info("g1").unwrap().unwrap().count, 0);
+
+    // 流信息
+    let info = stream.get_info().unwrap().unwrap();
+    assert_eq!(info.length, 3);
+    assert_eq!(info.groups, 1);
+    assert!(info.last_generated_id.is_some());
+}
+
+#[test]
+fn stream_object_messages_roundtrip_in_group() {
+    let (_server, full) = mock_full();
+    let mut stream = full.get_stream("stream:orders");
+    stream.set_group("orders").unwrap();
+
+    for (code, count) in [("A-001", 3), ("A-002", 5)] {
+        stream
+            .add(
+                &StreamOrder {
+                    code: code.into(),
+                    count,
+                    create_time: sample_time(),
+                },
+                None,
+            )
+            .unwrap();
+    }
+
+    let orders: Vec<StreamOrder> = stream.take_structs(10).unwrap();
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].code, "A-001");
+    assert_eq!(orders[1].count, 5);
+    assert_eq!(orders[0].create_time, sample_time());
+}
+
+#[test]
+fn stream_retry_ack_steals_pending_from_other_consumer() {
+    let (_server, full) = mock_full();
+    let key = "stream:steal";
+
+    // 消费者 A 取走但“崩溃”未确认
+    {
+        let mut a = full.get_stream(key);
+        a.set_group("g").unwrap();
+        a.add(&"m1", None).unwrap();
+        let msgs = a.take_messages(1, 0).unwrap();
+        assert_eq!(msgs.len(), 1);
+    }
+
+    // 消费者 B（同组）在空闲超时后抢占
+    let mut b = full.get_stream(key);
+    b.set_group("g").unwrap();
+    b.retry_interval_seconds = 0;
+    std::thread::sleep(Duration::from_millis(20)); // 让 A 的挂起消息 idle > 0
+
+    assert_eq!(b.retry_ack().unwrap(), 1, "应抢回 1 条死信");
+
+    // 抢回的消息优先被消费（claims 路径），确认后挂起清零
+    let msgs = b.take_messages(10, 0).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].primitive::<String>(), Some("m1".into()));
+    let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(b.acknowledge(&ids).unwrap(), 1);
+    assert_eq!(b.pending_info("g").unwrap().unwrap().count, 0);
+}
+
+#[test]
+fn stream_trim_and_delete() {
+    let (_server, full) = mock_full();
+    let stream = full.get_stream("stream:trim");
+
+    for i in 1..=10 {
+        stream
+            .add_fields(
+                &[("n".into(), i.to_string().into_bytes())],
+                Some(&format!("16957920000{i:02}-0")),
+                false,
+            )
+            .unwrap();
+    }
+    assert_eq!(stream.count().unwrap(), 10);
+
+    assert_eq!(stream.trim(5, true).unwrap(), 5);
+    assert_eq!(stream.count().unwrap(), 5);
+
+    let msgs = stream.range(None, None, -1).unwrap();
+    assert_eq!(stream.delete(&msgs[0].id).unwrap(), 1);
+    assert_eq!(stream.count().unwrap(), 4);
+}
+
 // ================== 编码器可直接使用 ==================
 
 #[test]
 fn encoder_can_be_used_directly_for_cross_language_payloads() {
-    // C# 端写入的 JSON（System.Text.Json）
     let json = br#"{"Name":"HiLink","CreateTime":"2026-09-26T10:00:00"}"#;
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]

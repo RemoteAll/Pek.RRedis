@@ -29,6 +29,7 @@
 //! | `RedisList<T>` / `RedisSet<T>` / `RedisSortedSet<T>` / `RedisStack<T>` | [`RedisList`] / [`RedisSet`] / [`RedisSortedSet`] / [`RedisStack`] |
 //! | `RedisGeo` / `HyperLogLog` / `PubSub` | [`RedisGeo`] / [`HyperLogLog`] / [`PubSub`] |
 //! | `RedisQueue<T>` / `RedisReliableQueue<T>` / `RedisDelayQueue<T>` | [`RedisQueue`] / [`RedisReliableQueue`] / [`RedisDelayQueue`] |
+//! | `RedisStream<T>`（Stream 消息队列） | [`RedisStream`]（非泛型：`add` 接受任意 `Serialize`，`take_bodies`/`take_structs` 指定消费类型） |
 //! | `QueueBase.AttachTraceId`（链路追踪注入） | [`queues::QueueSettings::trace`](queues::QueueSettings) |
 //! | `Cache.AcquireLock`（分布式锁） | [`FullRedis::acquire_lock`] |
 //! | `StartPipeline` / `StopPipeline` | [`Redis::pipeline`] / [`Pipeline`] |
@@ -56,6 +57,8 @@
 //! #[serde(rename_all = "PascalCase")] // 与 C# 属性名对齐
 //! struct User {
 //!     name: String,
+//!     // JSON 内时间：兼容 C# FastJson 文本格式与 ISO 8601
+//!     #[serde(with = "pek_rredis::encoder::datetime")]
 //!     create_time: chrono::NaiveDateTime,
 //! }
 //!
@@ -119,7 +122,10 @@ pub use hash::RedisHash;
 pub use hyperloglog::HyperLogLog;
 pub use list::RedisList;
 pub use pubsub::PubSub;
-pub use queues::{RedisDelayQueue, RedisQueue, RedisQueueStatus, RedisReliableQueue};
+pub use queues::{
+    ConsumerInfo, GroupInfo, Message, PendingInfo, PendingItem, RedisDelayQueue, RedisQueue,
+    RedisQueueStatus, RedisReliableQueue, RedisStream, StreamInfo,
+};
 pub use set::RedisSet;
 pub use sortedset::RedisSortedSet;
 pub use stack::RedisStack;

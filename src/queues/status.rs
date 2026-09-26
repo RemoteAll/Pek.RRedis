@@ -4,7 +4,9 @@
 //! （含时区偏移）与 NewLife 文本格式，保证 C# 端读取本端写入的状态、反之亦然。
 
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+
+use crate::encoder::{FromRedisPayload, ToRedisPayload};
 
 /// 队列消费者状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,11 +26,11 @@ pub struct RedisQueueStatus {
     /// IP 地址
     #[serde(alias = "ip", alias = "IP")]
     pub ip: Option<String>,
-    /// 开始时间
-    #[serde(alias = "createTime", with = "flex_datetime")]
+    /// 开始时间（读取兼容 C# ISO 8601 与 NewLife 文本格式）
+    #[serde(alias = "createTime", with = "crate::encoder::datetime")]
     pub create_time: NaiveDateTime,
     /// 最后活跃时间
-    #[serde(alias = "lastActive", with = "flex_datetime")]
+    #[serde(alias = "lastActive", with = "crate::encoder::datetime")]
     pub last_active: NaiveDateTime,
     /// 消费消息数
     pub consumes: i64,
@@ -67,6 +69,19 @@ impl RedisQueueStatus {
     }
 }
 
+impl ToRedisPayload for RedisQueueStatus {
+    fn to_redis_payload(&self) -> crate::Result<Option<Vec<u8>>> {
+        Ok(Some(serde_json::to_vec(self)?))
+    }
+}
+
+impl FromRedisPayload for RedisQueueStatus {
+    fn from_redis_payload(payload: &[u8]) -> crate::Result<Self> {
+        Self::from_json(&String::from_utf8_lossy(payload))
+            .ok_or_else(|| crate::Error::Type("无法解析 RedisQueueStatus JSON".into()))
+    }
+}
+
 /// 本机名（与 C# `Environment.MachineName` 对应）。
 pub fn machine_name() -> Option<String> {
     std::env::var("COMPUTERNAME")
@@ -91,35 +106,6 @@ pub fn new_consumer_key() -> String {
     (0..8)
         .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
         .collect()
-}
-
-mod flex_datetime {
-    use super::*;
-
-    pub fn serialize<S>(dt: &NaiveDateTime, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&format_iso(dt))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let text = String::deserialize(deserializer)?;
-        crate::encoder::parse_datetime(&text).map_err(serde::de::Error::custom)
-    }
-
-    /// System.Text.Json 风格：无小数秒时省略秒的小数部分。
-    fn format_iso(dt: &NaiveDateTime) -> String {
-        use chrono::Timelike;
-        if dt.nanosecond() == 0 {
-            dt.format("%Y-%m-%dT%H:%M:%S").to_string()
-        } else {
-            dt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
-        }
-    }
 }
 
 #[cfg(test)]

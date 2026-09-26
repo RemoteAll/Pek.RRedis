@@ -26,7 +26,7 @@ use crate::hash::RedisHash;
 use crate::hyperloglog::HyperLogLog;
 use crate::list::RedisList;
 use crate::pubsub::PubSub;
-use crate::queues::{RedisDelayQueue, RedisQueue, RedisReliableQueue};
+use crate::queues::{RedisDelayQueue, RedisQueue, RedisReliableQueue, RedisStream};
 use crate::set::RedisSet;
 use crate::sortedset::RedisSortedSet;
 use crate::stack::RedisStack;
@@ -401,6 +401,14 @@ impl FullRedis {
         topic: &str,
     ) -> RedisDelayQueue<V> {
         RedisDelayQueue::new(self.clone(), topic)
+    }
+
+    /// Stream 消息队列（对应 C# `GetStream<T>(topic)`，Redis 5.0+）。
+    ///
+    /// Rust 侧为非泛型：生产用 [`RedisStream::add`]（接受任意 `Serialize`），
+    /// 消费用 [`RedisStream::take_bodies`] / [`RedisStream::take_structs`] 指定类型。
+    pub fn get_stream(&self, topic: &str) -> RedisStream {
+        RedisStream::new(self.clone(), topic)
     }
 }
 

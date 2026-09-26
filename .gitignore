@@ -1,5 +1,16 @@
+# ---- Rust ----
 /target
 Cargo.lock
-*.pdb
+
+# ---- C# Demo（构建产物与运行日志不入库）----
+demo/**/bin/
+demo/**/obj/
+**/Log/
+*.log
+
+# ---- 编辑器/临时文件 ----
 .vscode/
+.idea/
+.vs/
+*.pdb
 _api_dump.txt

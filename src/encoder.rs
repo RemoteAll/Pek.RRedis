@@ -247,6 +247,90 @@ impl FromRedisPayload for serde_json::Value {
     }
 }
 
+/// JSON 中时间字段的宽容序列化模块。
+///
+/// chrono 的 serde 默认实现**只能读 ISO 8601**；而 C# 侧 FastJson 会把
+/// `DateTime` 写成 `"2026-09-26 10:00:00"`（NewLife 文本格式，且不含毫秒）。
+/// 给结构体字段加上本模块即可双向互通：
+///
+/// ```no_run
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// #[serde(rename_all = "PascalCase")]
+/// struct User {
+///     name: String,
+///     #[serde(with = "pek_rredis::encoder::datetime")]
+///     create_time: chrono::NaiveDateTime,
+/// }
+/// ```
+///
+/// - 写入：ISO 8601（`2026-09-26T10:00:00`），与 System.Text.Json 一致，C# 两种 JsonHost 都能读；
+/// - 读取：ISO 8601、带时区偏移、NewLife 文本（`yyyy-MM-dd HH:mm:ss[.fff]`）均可。
+pub mod datetime {
+    use chrono::NaiveDateTime;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// 序列化为 ISO 8601 文本。
+    pub fn serialize<S>(value: &NaiveDateTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+    }
+
+    /// 反序列化，兼容 ISO 8601 与 NewLife 文本格式。
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        super::parse_datetime(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Stream/字段路径的「编码器文本」时间模块。
+///
+/// C# 把对象属性写入 Stream 字段或队列消息时走的是 `DefaultPacketEncoder`，
+/// `DateTime` 输出 `yyyy-MM-dd HH:mm:ss.fff`（与 JSON 路径不同）。
+/// 给 Stream 对象消息的结构体时间字段加本模块，写入即可与 C# 逐字节一致：
+///
+/// ```no_run
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// #[serde(rename_all = "PascalCase")]
+/// struct Order {
+///     code: String,
+///     #[serde(with = "pek_rredis::encoder::datetime_text")]
+///     create_time: chrono::NaiveDateTime,
+/// }
+/// ```
+///
+/// - 写入：`2026-09-26 10:00:00.123`（与 C# 编码器完全一致）；
+/// - 读取：兼容本格式、ISO 8601 与带时区偏移。
+pub mod datetime_text {
+    use chrono::NaiveDateTime;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// 序列化为 `yyyy-MM-dd HH:mm:ss.fff`。
+    pub fn serialize<S>(value: &NaiveDateTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&super::format_datetime(value))
+    }
+
+    /// 反序列化，兼容编码器文本与 ISO 8601。
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        super::parse_datetime(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// 格式化为 C# `DateTime.ToString("yyyy-MM-dd HH:mm:ss.fff")` 形式。
 pub fn format_datetime(dt: &NaiveDateTime) -> String {
     dt.format("%Y-%m-%d %H:%M:%S.%3f").to_string()
@@ -433,6 +517,35 @@ mod tests {
         let user: Json<User> = Json::from_redis_payload(json).unwrap();
         assert_eq!(user.0.name, "NewLife");
         assert_eq!(user.0.create_time.to_string(), "2026-09-26 10:00:00");
+    }
+
+    #[test]
+    fn datetime_serde_module_accepts_newlife_text_and_iso() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct Row {
+            #[serde(with = "crate::encoder::datetime")]
+            t: NaiveDateTime,
+        }
+
+        // C# FastJson 输出（文本格式、无毫秒）
+        let row: Row = serde_json::from_str(r#"{"t":"2026-09-26 10:00:00"}"#).unwrap();
+        assert_eq!(row.t.to_string(), "2026-09-26 10:00:00");
+
+        // C# System.Text.Json / Rust 输出（ISO 8601）
+        let row2: Row = serde_json::from_str(r#"{"t":"2026-09-26T10:00:00.123"}"#).unwrap();
+        assert_eq!(row2.t.to_string(), "2026-09-26 10:00:00.123");
+
+        // 带时区偏移也要能读（换算为本机时区，因此断言用同一算法推导期望值）
+        let row3: Row = serde_json::from_str(r#"{"t":"2026-09-26T10:00:00+08:00"}"#).unwrap();
+        let expected = DateTime::parse_from_rfc3339("2026-09-26T10:00:00+08:00")
+            .unwrap()
+            .with_timezone(&Local)
+            .naive_local();
+        assert_eq!(row3.t, expected);
+
+        // 写回为 ISO（C# 两种 JsonHost 都能读）
+        let text = serde_json::to_string(&row).unwrap();
+        assert_eq!(text, r#"{"t":"2026-09-26T10:00:00"}"#);
     }
 
     #[test]

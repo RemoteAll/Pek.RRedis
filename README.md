@@ -34,13 +34,13 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | `RedisQueue` | 同名 | ✅ `LPUSH` + `RPOP`/`BRPOP`，批量管道消费 |
 | `RedisReliableQueue` | 同名 | ✅ Ack 队列、状态键、死信回滚、全局清理、`Publish`/`Consume` 高级用法、延迟队列挂载 |
 | `RedisDelayQueue` | 同名 | ✅ `ZADD`(到期时间) + `ZRANGEBYSCORE`/`ZREM` 抢占 + 转移循环 |
-| `RedisStream`（Stream 消息队列） | 同名 | 🚧 规划中（XADD/XREADGROUP/XAUTOCLAIM） |
+| `RedisStream`（Stream 消息队列） | 同名 | ✅ `XADD`/`XRANGE`/`XREAD`/`XREADGROUP`/`XACK`/`XPENDING`/`XCLAIM`/`XGROUP`/`XINFO`/`XTRIM`/`XDEL`；`__data` 基元约定、对象字段扁平化、消费组、死信抢占（`retry_ack`） |
 | `Clusters`（Cluster/Sentinel/Replication） | 同名 | 🚧 规划中（当前支持多地址故障切换） |
 | `RedisEventBus` / `RedisRedLock` / ASP.NET 集成 | `Services` | 🚧 规划中 |
 | 异步 API | `*Async` | 🚧 规划中（当前同步阻塞 + 线程/`spawn_blocking`） |
 
-测试：**71 项**（46 单元 + 18 进程内端到端 + 2 文档 + 5 真实 Redis 可选），`cargo test` 离线全绿，
-`cargo clippy --all-targets` 零告警。
+测试：**87 项**（53 单元 + 25 进程内端到端 + 4 文档 + 5 真实 Redis 可选），`cargo test` 离线全绿，
+`cargo clippy --all-targets` 零告警；另有 C#/Rust 两个可执行 Demo 做交叉验证（见第四节）。
 
 ---
 
@@ -57,7 +57,15 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | 整数 | 十进制文本 `123` | — |
 | 浮点 | 往返最短文本 `1.5` | `Infinity` / `NaN` |
 | 时间 | `yyyy-MM-dd HH:mm:ss.fff` | 同时接受 ISO 8601（含时区偏移） |
-| 复杂对象 | JSON（System.Text.Json 风格，属性名建议 PascalCase） | 容忍 BOM |
+| 复杂对象 | JSON（属性名建议 PascalCase；时间字段见下） | 容忍 BOM，时间兼容 ISO 与 NewLife 文本 |
+
+> **JSON 内的时间字段**：Rust 结构体上的时间字段请加
+> `#[serde(with = "pek_rredis::encoder::datetime")]`——写入 ISO 8601（与 System.Text.Json 一致），
+> 读取同时兼容 C# **FastJson** 的 `2026-09-26 10:00:00` 文本格式（chrono 的 serde 默认只认 ISO，
+> 不加会在读 C# 数据时失败）。另注意 FastJson 写 JSON 时**不含毫秒**，跨语言样本建议时间取整秒。
+>
+> **Stream 对象消息 / 字段路径**：时间字段用 `#[serde(with = "pek_rredis::encoder::datetime_text")]`，
+> 输出 `2026-09-26 10:00:00.123`，与 C# `DefaultPacketEncoder` 的字段编码逐字节一致。
 
 ### 键空间与结构
 
@@ -97,6 +105,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "PascalCase")] // 与 C# 属性名对齐
 struct User {
     name: String,
+    // JSON 内时间：兼容 C# FastJson 文本格式与 ISO 8601（chrono serde 默认只认 ISO）
+    #[serde(with = "pek_rredis::encoder::datetime")]
     create_time: chrono::NaiveDateTime,
 }
 
@@ -164,7 +174,37 @@ cargo test --test live_redis -- --nocapture
 
 ---
 
-## 四、C# ↔ Rust 概念对照
+## 四、Demo：与 C# 端相互验证
+
+仓库内置两个命令与样本**逐项对应**的演示程序，互为验证（详见 [`demo/README.md`](demo/README.md)）：
+
+| 侧 | 程序 | 运行方式 |
+|----|------|----------|
+| C# | `demo/csharp/PekRRedisDemo`（引用 DH.NRedis 源码工程） | `dotnet run --project demo\csharp\PekRRedisDemo -- auto --config "<连接串>"` |
+| Rust | `examples/demo.rs` | `cargo run --example demo -- auto --config "<连接串>"` |
+
+已实测的验证内容（2026-09-26）：
+
+- `selftest`：两侧编码器字节格式全绿（字符串/整数/布尔/时间/JSON，含互相解码）；
+- 交叉读写：C# `write` → Rust `verify` 14/14；Rust `write` → C# `verify` 14/14，双方回执 `Failures` 均为空；
+- 可靠队列：C# 生产 → Rust 消费并 Ack；Rust 生产 → C# 消费并 Ack；双方 `qstatus` 能解析对方的 Status JSON；
+- Stream：C# 写入（基元 `__data` + 对象字段）→ Rust 消费并 Ack；Rust 写入 → C# 消费并 Ack；
+  C# 消费不确认 → Rust `retry_ack`（`XPENDING`+`XCLAIM`）抢回并确认，双方 `stream-status` 互认消费者与挂起；
+- 延迟队列：C# 写入（delay=2s）→ Rust 到期后消费；Rust 写入 → C# 到期后消费（`ZSET score` 两端一致）；
+- 分布式锁：C# 持锁期间 Rust 抢锁失败，释放后 Rust 立即接管（两种锁值格式兼容）。
+
+没有真实 Redis 也能跑（内置迷你 Redis，RESP2 子集）：
+
+```powershell
+cargo run --example mock_redis                                            # 终端1
+cargo run --example demo -- auto --mock                                   # 终端2（Rust 自演）
+dotnet run --project demo\csharp\PekRRedisDemo -- auto --config "server=127.0.0.1:16379;db=0"   # 终端3
+cargo run --example demo -- verify --config "server=127.0.0.1:16379;db=0"                       # 交叉验证
+```
+
+---
+
+## 五、C# ↔ Rust 概念对照
 
 | C# / DH.NRedis | Rust / pek-rredis |
 |----------------|-------------------|
@@ -184,28 +224,32 @@ cargo test --test live_redis -- --nocapture
 
 ---
 
-## 五、与 DH.NRedis 的已知差异
+## 六、与 DH.NRedis 的已知差异
 
 1. **运行期 `SELECT`**：C# 可在同一实例切换库；Rust 侧以「配置即状态」为原则，请用 `create_sub(db)` 创建子实例（连接池状态不会被多线程共享污染）。
 2. **`Search` 边界**：C# 中 `count <= 0` 不返回任何键（含 `Remove("*")` 的边界行为）；Rust 按「不限量」处理并返回去前缀键名。
 3. **`GetAll` 键名**：C# `FullRedis.GetAll` 返回**带前缀**的键名；Rust 返回调用方传入的原始键名。
 4. **解码容错**：两端一致——解码失败返回 `None`（不抛异常）；服务端 `-ERR` 抛 `Error::Server` 且不重试。
 5. **暂未实现**：`RedisStream`、集群/哨兵/主从感知、`RedisEventBus`、`RedLock`、ASP.NET Core 集成、TLS、异步 API（见路线图）。
+6. **JSON 时间格式**：C# 默认 JsonHost 为 FastJson（`2026-09-26 10:00:00`，无毫秒）；Rust 写 ISO 8601。
+   Rust 侧结构体时间字段需用 `#[serde(with = "pek_rredis::encoder::datetime")]` 才能互读（裸值路径无此问题）。
+7. **Stream 对象消息字段顺序**：C# 按属性声明顺序，Rust 按字典序（serde_json 默认）；字段名与值为准，顺序不影响语义。
+   字段内时间用 `encoder::datetime_text`（`yyyy-MM-dd HH:mm:ss.fff`，与 C# 字段编码逐字节一致）。
 
 ---
 
-## 六、路线图
+## 七、路线图
 
 | 阶段 | 内容 |
 |------|------|
-| v0.2 | `RedisStream`（XADD/XREADGROUP/XAUTOCLAIM + `__data` 字段约定）、`BLMOVE`/`LMPOP` 等新命令、`RedisRedLock` |
+| v0.2 | 集群/哨兵/主从（`Cluster`/`Sentinel`/`Replication`）、`RedisRedLock`、`BLMOVE`/`LMPOP` 等命令补齐（`RedisStream` 已在 v0.1 完成） |
 | v0.3 | 集群/哨兵/主从（`Cluster`/`Sentinel`/`Replication`）、RESP3 推送与 `CLIENT TRACKING` |
 | v0.4 | 异步 API（tokio）、TLS、`RedisEventBus` 与 ASP.NET Core 风格 DI 集成 |
 | v1.0 | 与 DH.NRedis 的 XUnitTest 跑同一套集成测试做双向互操作回归 |
 
 ---
 
-## 七、渐进迁移建议
+## 八、渐进迁移建议
 
 1. **共用键前缀**：Rust 先只读写新业务键（如 `r:order:*`），C# 保持原键空间；
 2. **影子消费**：可靠队列天然支持多消费者（各自 `ukey`），让 Rust 消费者先在旁路消费比对结果；
