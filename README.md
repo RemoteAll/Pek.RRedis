@@ -26,21 +26,39 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | `client` | `RedisClient`（TCP、AUTH、SELECT、HELLO） | ✅ 含超时、惰性握手、断线标记 |
 | `pool` | `ObjectPool<RedisClient>` | ✅ Min/Max/IdleTime/MaxLifetime/WaitTimeout，空闲 PING 健康检查 |
 | `encoder` | `RedisJsonEncoder` / `DefaultPacketEncoder` | ✅ 字节格式逐条对齐（见下表） |
-| `redis`（基础命令） | `Redis` | ✅ 字符串/键/过期/位图/批量/服务器信息/脚本/管道 |
-| `full` | `FullRedis` | ✅ 前缀、SCAN 搜索、模式删除、Eval、分布式锁、结构工厂 |
-| `RedisHash` / `RedisList` / `RedisSet` / `RedisSortedSet` / `RedisStack` | 同名 | ✅ 常用命令 + SCAN 系列 |
+| `redis`（基础命令） | `Redis` | ✅ 字符串/键/过期/位图/`BITFIELD`/批量/服务器信息（`ServerType`/`Version` 探测与 `require_version` 门禁）/脚本/管道 |
+| `full` | `FullRedis` | ✅ 前缀（含基础命令前缀包装）、SCAN 搜索、模式删除、Eval/FCall、分布式锁、RedLock、结构工厂 |
+| `RedisHash` / `RedisList` / `RedisSet` / `RedisSortedSet` / `RedisStack` | 同名 | ✅ 全量命令对齐（含 `HGETDEL`/`HGETEX`、`LMOVE`/`BLMOVE`/`LMPOP`、`SMISMEMBER`/`SINTERCARD`、`ZUNION/ZINTER/ZDIFF` 族、`ZRANGESTORE`、`ZMPOP`/`BZPOPMIN/MAX`） |
 | `RedisGeo` / `HyperLogLog` | 同名 | ✅ 常用命令 |
 | `PubSub` | `PubSub` | ✅ 订阅/模式订阅/分片订阅/自省 |
 | `RedisQueue` | 同名 | ✅ `LPUSH` + `RPOP`/`BRPOP`，批量管道消费 |
-| `RedisReliableQueue` | 同名 | ✅ Ack 队列、状态键、死信回滚、全局清理、`Publish`/`Consume` 高级用法、延迟队列挂载 |
+| `RedisReliableQueue` | 同名 | ✅ Ack 队列、状态键、死信回滚、全局清理、`Publish`/`Consume`；`consume_json`/`consume_raw` 大循环（10 次失败丢弃 + 备份库计数，与 C# `ConsumeAsync` 一致） |
 | `RedisDelayQueue` | 同名 | ✅ `ZADD`(到期时间) + `ZRANGEBYSCORE`/`ZREM` 抢占 + 转移循环 |
 | `RedisStream`（Stream 消息队列） | 同名 | ✅ `XADD`/`XRANGE`/`XREAD`/`XREADGROUP`/`XACK`/`XPENDING`/`XCLAIM`/`XGROUP`/`XINFO`/`XTRIM`/`XDEL`；`__data` 基元约定、对象字段扁平化、消费组、死信抢占（`retry_ack`） |
-| `Clusters`（Cluster/Sentinel/Replication） | 同名 | 🚧 规划中（当前支持多地址故障切换） |
-| `RedisEventBus` / `RedisRedLock` / ASP.NET 集成 | `Services` | 🚧 规划中 |
+| `RedisRedLock` | `Services.RedisRedLock` | ✅ `acquire_red_lock`：quorum/令牌回滚/`EVAL` 比较删除，与 C# 算法逐行一致 |
+| Tair 扩展（阿里云） | `FullRedis.Ex*` | ✅ `ex_set`/`ex_get`/`ex_incr_by`/`ex_hset`/`ex_hget`/`ex_hmget`/`ex_hget_with_ver`/`ex_hincr_by`/`ex_hpttl`/`ex_hkeys`/`ex_hvals`/`ex_hlen`/`ex_hdel`（需 Tair 实例） |
+| `Clusters`（Cluster/Sentinel/Replication） | 同名 | 🚧 未实现（唯一剩余大项，见路线图；当前仅支持多地址故障切换） |
+| `RedisEventBus` / ASP.NET 集成（`RedisCacheProvider`/`RedisStat`/`RedisDeferred`/`CacheExtensions`） | `Services` | ➖ 不迁移（.NET 运行时专属，见审计说明） |
 | 异步 API | `*Async` | 🚧 规划中（当前同步阻塞 + 线程/`spawn_blocking`） |
 
-测试：**87 项**（53 单元 + 25 进程内端到端 + 4 文档 + 5 真实 Redis 可选），`cargo test` 离线全绿，
-`cargo clippy --all-targets` 零告警；另有 C#/Rust 两个可执行 Demo 做交叉验证（见第四节）。
+测试：**103 项**（53 单元 + 46 进程内端到端（25 互通 + 21 审计）+ 4 文档；另有 5 项真实 Redis 可选），
+`cargo test` 离线全绿，`cargo clippy --all-targets` 零告警；另有 C#/Rust 两个可执行 Demo 做交叉验证（见第四节）。
+
+### 与 C# 全量 API 审计（2026-09-26 复核）
+
+对 DH.NRedis 全部 public 方法逐项核对（`Redis`/`FullRedis`/各结构体/队列/`Services`/`Clusters`），结论：
+
+- ✅ **命令级能力已全部对齐并测试**：本轮补齐 `GETEX`、`EXPIRETIME`/`PEXPIRETIME`、`OBJECT IDLETIME`/`FREQ`、`BITFIELD`、
+  `HGETDEL`/`HGETEX`、`LMOVE`/`BLMOVE`/`LMPOP`/多键 `BRPOP`/`BLPOP`、`SMISMEMBER`/`SINTERCARD`、`ZMSCORE`/`ZRANDMEMBER`/
+  `ZRANGESTORE`/`ZDIFF(STORE)`/`ZUNION(STORE)`/`ZINTER(STORE)`（含 `WEIGHTS`/`AGGREGATE`/`WITHSCORES`）/`ZMPOP`/`BZPOPMIN`/`BZPOPMAX`、
+  `SWAPDB`/`WAIT`/`SLOWLOG`/`LATENCY`/`REPLICAOF`、`FUNCTION LOAD/LIST/DELETE` 与 `FCALL`/`FCALL_RO`、
+  `ServerType`/`Version` 探测、`FullRedis` 基础命令前缀包装、`RedisRedLock`、`consume_json`/`consume_raw`、Tair `Ex*`。
+- ➖ **明确不迁移（.NET 生态专属，与数据格式无关）**：`Bench`、`WriteLog`、`RedisCacheProvider`（ASP.NET `ICacheProvider`）、
+  `RedisEventBus`、`RedisStat`、`RedisDeferred`、`CacheExtensions`、DI 扩展；`Tracer`/`Counter` 由 `QueueSettings::trace` 等效覆盖。
+- 🚧 **已知未实现**：Cluster/Sentinel/Replication、TLS、异步 API（见路线图）。
+- ⚠️ **发现的 C# 侧问题（Rust 按官方行为实现）**：
+  1. `RedisHash.HGetDel`/`HGetEx` 缺少 `FIELDS 1` 参数，对真实 Redis 会报语法错误；
+  2. `RedisRedLock` 加锁使用普通 `SET`（非 `NX`），无互斥保证；Rust 为保持行为一致原样复刻，**混用两端 RedLock 不可依赖互斥**。
 
 ---
 
@@ -218,6 +236,10 @@ cargo run --example demo -- verify --config "server=127.0.0.1:16379;db=0"       
 | `RedisQueue<T>` / `RedisReliableQueue<T>` / `RedisDelayQueue<T>` | 同名类型（`get_queue` / `get_reliable_queue` / `get_delay_queue`） |
 | `QueueBase.AttachTraceId` | `queues::QueueSettings::trace` |
 | `Cache.AcquireLock` | `FullRedis::acquire_lock` / `acquire_lock_ex`，返回 `LockHandle`（Drop 自动释放） |
+| `RedisRedLock.Acquire` | `acquire_red_lock` / `FullRedis::acquire_red_lock`（返回 `RedLock`，Drop 自动释放） |
+| `QueueExtensions.ConsumeAsync<T>` | `RedisReliableQueue::consume_json`（类型化）/ `consume_raw`（字符串） |
+| `FullRedis.Ex*`（Tair 扩展） | `FullRedis::ex_set`/`ex_get`/`ex_hset`/`ex_hincr_by`…（`tair` 模块） |
+| `Redis.ServerType` / `Redis.Version` | `Redis::server_type` / `version_parts` / `require_version` |
 | `StartPipeline` / `StopPipeline` | `Redis::pipeline()` / `Pipeline::execute` |
 | `CreateSub(db)` | `Redis::create_sub` / `FullRedis::create_sub` |
 | `Search(pattern, offset, count)` | `FullRedis::search(pattern, count)` / `search_paged` |
@@ -230,22 +252,29 @@ cargo run --example demo -- verify --config "server=127.0.0.1:16379;db=0"       
 2. **`Search` 边界**：C# 中 `count <= 0` 不返回任何键（含 `Remove("*")` 的边界行为）；Rust 按「不限量」处理并返回去前缀键名。
 3. **`GetAll` 键名**：C# `FullRedis.GetAll` 返回**带前缀**的键名；Rust 返回调用方传入的原始键名。
 4. **解码容错**：两端一致——解码失败返回 `None`（不抛异常）；服务端 `-ERR` 抛 `Error::Server` 且不重试。
-5. **暂未实现**：`RedisStream`、集群/哨兵/主从感知、`RedisEventBus`、`RedLock`、ASP.NET Core 集成、TLS、异步 API（见路线图）。
+5. **当前未实现**：集群/哨兵/主从感知、TLS、异步 API（见路线图）。其余命令级能力已全部对齐（见第一节审计）。
 6. **JSON 时间格式**：C# 默认 JsonHost 为 FastJson（`2026-09-26 10:00:00`，无毫秒）；Rust 写 ISO 8601。
    Rust 侧结构体时间字段需用 `#[serde(with = "pek_rredis::encoder::datetime")]` 才能互读（裸值路径无此问题）。
 7. **Stream 对象消息字段顺序**：C# 按属性声明顺序，Rust 按字典序（serde_json 默认）；字段名与值为准，顺序不影响语义。
    字段内时间用 `encoder::datetime_text`（`yyyy-MM-dd HH:mm:ss.fff`，与 C# 字段编码逐字节一致）。
+8. **Tair `Ex*`**：仅阿里云 Tair（KVStore）实例可用；标准 Redis 执行会返回未知命令（与 C# 行为相同）。
+9. **`AutoPipeline`/`FullPipeline`**：C# 的自动管道优化未复刻，Rust 使用显式 `pipeline()`（语义等价）。
+10. **异步 API**：C# 的 `*Async` 在 Rust 以同步 API + 线程池承接（tokio 版见路线图）。
+11. **.NET 专属服务类不迁移**：`RedisStat`/`RedisDeferred`/`RedisEventBus`/`RedisCacheProvider`/`CacheExtensions`（依赖 TimerX/依赖注入）。
 
 ---
 
-## 七、路线图
+## 七、路线图（2026-09-26 更新）
 
 | 阶段 | 内容 |
 |------|------|
-| v0.2 | 集群/哨兵/主从（`Cluster`/`Sentinel`/`Replication`）、`RedisRedLock`、`BLMOVE`/`LMPOP` 等命令补齐（`RedisStream` 已在 v0.1 完成） |
-| v0.3 | 集群/哨兵/主从（`Cluster`/`Sentinel`/`Replication`）、RESP3 推送与 `CLIENT TRACKING` |
-| v0.4 | 异步 API（tokio）、TLS、`RedisEventBus` 与 ASP.NET Core 风格 DI 集成 |
+| v0.2 | 集群/哨兵/主从（`Cluster`/`Sentinel`/`Replication`）；RESP3 推送与 `CLIENT TRACKING` |
+| v0.3 | 异步 API（tokio）、TLS |
 | v1.0 | 与 DH.NRedis 的 XUnitTest 跑同一套集成测试做双向互操作回归 |
+
+> 已提前完成：全部命令级补齐、`RedisRedLock`、`consume_json`/`consume_raw`、Tair `Ex*`（2026-09-26 审计）。
+> 唯一剩余大项为**集群/哨兵/主从**，属独立子系统（槽位路由/MOVED/ASK），需单独排期；
+> 现有"多地址故障切换"仅覆盖单实例多地址场景。
 
 ---
 

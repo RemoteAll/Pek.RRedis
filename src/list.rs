@@ -279,6 +279,29 @@ where
         Ok(if rs.is_null() { None } else { rs.as_i64() })
     }
 
+    /// 查找元素首次出现的下标（对应 C# `IndexOf`，语义同 [`RedisList::position`]）。
+    pub fn index_of(&self, value: &V) -> Result<Option<i64>> {
+        self.position(value)
+    }
+
+    /// 在指定下标处插入元素（对应 C# `Insert(index, item)`：以该位置旧元素为 `LINSERT BEFORE` 基准）。
+    ///
+    /// 下标越界返回 `-1`（C# 会抛异常，语义差异见 README「已知差异」）。
+    pub fn insert_at(&self, index: i64, value: &V) -> Result<i64> {
+        match self.get(index)? {
+            Some(pivot) => self.insert_before(&pivot, value),
+            None => Ok(-1),
+        }
+    }
+
+    /// 删除指定下标的元素（对应 C# `RemoveAt(index)`：先取下标元素再 `LREM 1`）。
+    pub fn remove_at(&self, index: i64) -> Result<i64> {
+        match self.get(index)? {
+            Some(value) => self.remove(1, &value),
+            None => Ok(0),
+        }
+    }
+
     /// 元素数量（`LPOS COUNT 0` 语义不便跨版本，此处用 LRANGE 遍历判断，与 C# `Contains` 等价）。
     pub fn contains(&self, value: &V) -> Result<bool>
     where

@@ -32,6 +32,10 @@
 //! | `RedisStream<T>`（Stream 消息队列） | [`RedisStream`]（非泛型：`add` 接受任意 `Serialize`，`take_bodies`/`take_structs` 指定消费类型） |
 //! | `QueueBase.AttachTraceId`（链路追踪注入） | [`queues::QueueSettings::trace`](queues::QueueSettings) |
 //! | `Cache.AcquireLock`（分布式锁） | [`FullRedis::acquire_lock`] |
+//! | `RedisRedLock`（多实例分布式锁） | [`acquire_red_lock`] / [`FullRedis::acquire_red_lock`]（[`RedLock`]） |
+//! | `QueueExtensions.ConsumeAsync<T>`（类型化消费循环） | [`RedisReliableQueue::consume_json`] / [`consume_raw`](RedisReliableQueue::consume_raw) |
+//! | Tair 扩展（阿里云 `Ex*`） | [`FullRedis::ex_set`] / [`FullRedis::ex_get`] / [`FullRedis::ex_hset`] …（[`tair`]） |
+//! | `Redis.ServerType` / `Redis.Version` | [`Redis::server_type`] / [`Redis::version_parts`] / [`Redis::require_version`] |
 //! | `StartPipeline` / `StopPipeline` | [`Redis::pipeline`] / [`Pipeline`] |
 //!
 //! ## 互通保证（与 C# 端同一字节格式）
@@ -104,17 +108,20 @@ pub mod pubsub;
 pub mod queues;
 pub mod redis;
 pub mod resp;
+pub mod services;
 pub mod set;
 pub mod sortedset;
 pub mod stack;
+pub mod tair;
 pub(crate) mod util;
 
 pub use encoder::{FromRedisPayload, Json, ToRedisPayload};
 pub use error::{Error, Result};
-pub use full::{FullRedis, LockHandle};
+pub use full::{FullRedis, LockHandle, SlowLogEntry};
 pub use options::{RedisOptions, RedisPoolConfig};
-pub use redis::{Pipeline, Redis};
+pub use redis::{Pipeline, Redis, ServerType};
 pub use resp::RespValue;
+pub use services::{acquire_red_lock, RedLock};
 
 // 常用类型直达
 pub use geo::{GeoMember, RedisGeo};

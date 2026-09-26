@@ -78,6 +78,27 @@ where
         ) > 0)
     }
 
+    /// 批量成员存在性（`SMISMEMBER`，对应 C# `SMIsMember`），返回顺序与输入一致。
+    pub fn mismember(&self, members: &[V]) -> Result<Vec<bool>> {
+        if members.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args: Vec<Vec<u8>> = Vec::with_capacity(members.len() + 2);
+        args.push(b"SMISMEMBER".to_vec());
+        args.push(self.key.as_bytes().to_vec());
+        for m in members {
+            args.push(payload(m)?);
+        }
+        let refs: Vec<&[u8]> = args.iter().map(|a| a.as_slice()).collect();
+        let rs = self.redis.redis().execute(&refs)?;
+        Ok(rs
+            .into_array()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.as_i64().unwrap_or(0) != 0)
+            .collect())
+    }
+
     /// 全部元素（`SMEMBERS`）。
     pub fn members(&self) -> Result<Vec<V>> {
         let rs = self

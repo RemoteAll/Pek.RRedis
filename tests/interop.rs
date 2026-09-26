@@ -245,8 +245,8 @@ fn search_and_remove_by_pattern() {
 fn info_and_version() {
     let (_server, full) = mock_full();
     let info = full.redis().info().unwrap();
-    assert_eq!(info.get("redis_version").unwrap(), "7.2.4");
-    assert_eq!(full.redis().version().unwrap().as_deref(), Some("7.2.4"));
+    assert_eq!(info.get("redis_version").unwrap(), "7.4.0");
+    assert_eq!(full.redis().version().unwrap().as_deref(), Some("7.4.0"));
 }
 
 // ================== 队列 ==================

@@ -89,9 +89,28 @@ struct Entry {
     expire_at: Option<Instant>,
 }
 
+/// 慢日志条目（供 `SLOWLOG GET` 测试）。
+#[derive(Clone, Debug)]
+pub struct MockSlowlogEntry {
+    pub id: i64,
+    pub timestamp: i64,
+    pub duration_us: i64,
+    pub command: Vec<Bytes>,
+}
+
 #[derive(Default)]
 pub struct Store {
     data: HashMap<Bytes, Entry>,
+    /// 已加载函数库名（`FUNCTION LOAD/LIST/DELETE`）
+    functions: Vec<String>,
+    /// 慢日志（`SLOWLOG`）
+    slowlog: Vec<MockSlowlogEntry>,
+    /// 延迟统计 `(event, timestamp, latest, max)`（`LATENCY`）
+    latency: Vec<(String, i64, i64, i64)>,
+    /// TairString 版本号（`EXSET`/`EXINCRBY`）
+    ex_versions: HashMap<Bytes, i64>,
+    /// TairHash 字段版本号（`EXHSET`）
+    ex_field_versions: HashMap<(Bytes, Bytes), i64>,
 }
 
 impl Store {
@@ -296,7 +315,17 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
         "QUIT" => (ok(), true),
         "SELECT" | "AUTH" | "CLIENT" => (ok(), false),
         "HELLO" => (error("ERR unknown command 'HELLO'"), false),
-        "INFO" => (bulk(b"# Server\r\nredis_version:7.2.4\r\nredis_mode:standalone\r\nos:Windows\r\n"), false),
+        "INFO" => (
+            bulk(
+                b"# Server\r\nredis_version:7.4.0\r\nredis_mode:standalone\r\nos:Windows\r\n\
+                  # Clients\r\nconnected_clients:1\r\n\
+                  # Memory\r\nused_memory:1024\r\nused_memory_rss:2048\r\n\
+                  # Stats\r\ntotal_commands_processed:7\r\n\
+                  # Replication\r\nconnected_slaves:0\r\n\
+                  # Keyspace\r\ndb0:keys=1,expires=0\r\n",
+            ),
+            false,
+        ),
         "DBSIZE" => (int(store.data.len() as i64), false),
         "FLUSHDB" => {
             store.data.clear();
@@ -669,15 +698,26 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
             }
         }
         "BRPOP" | "BLPOP" => {
-            // 测试中不模拟阻塞：无数据立即返回 nil 数组
-            let popped = match store.get_live(&args[1]).map(|e| &mut e.value) {
-                Some(Value::List(list)) => list.pop_back(),
-                _ => None,
-            };
-            match popped {
-                Some(v) => (array(vec![bulk(&args[1]), bulk(&v)]), false),
-                None => (nil(), false),
+            // 测试中不模拟阻塞：从最后一个参数（超时）之前的键中依次查找数据，无数据返回 nil
+            let keys = &args[1..args.len().saturating_sub(1)];
+            let mut reply = nil();
+            for key in keys {
+                let popped = match store.get_live(key).map(|e| &mut e.value) {
+                    Some(Value::List(list)) => {
+                        if cmd == "BRPOP" {
+                            list.pop_back()
+                        } else {
+                            list.pop_front()
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(v) = popped {
+                    reply = array(vec![bulk(key), bulk(&v)]);
+                    break;
+                }
             }
+            (reply, false)
         }
         "LLEN" => {
             let len = match store.get_live(&args[1]).map(|e| &e.value) {
@@ -929,8 +969,38 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
 
         // ---------- 有序集合 ----------
         "ZADD" => {
+            // 支持 [NX|XX|CH|INCR] 选项（对齐 C# `Add(options, members)`）
             let mut i = 2;
+            let mut nx = false;
+            let mut xx = false;
+            let mut ch = false;
+            let mut incr = false;
+            loop {
+                match String::from_utf8_lossy(&args[i]).to_uppercase().as_str() {
+                    "NX" => {
+                        nx = true;
+                        i += 1;
+                    }
+                    "XX" => {
+                        xx = true;
+                        i += 1;
+                    }
+                    "CH" => {
+                        ch = true;
+                        i += 1;
+                    }
+                    "INCR" => {
+                        incr = true;
+                        i += 1;
+                    }
+                    "GT" | "LT" => i += 1,
+                    _ => break,
+                }
+            }
+
             let mut added = 0;
+            let mut changed = 0;
+            let mut incr_result: Option<f64> = None;
             while i + 1 < args.len() {
                 let score = match parse_f64(&args[i]) {
                     Some(s) => s,
@@ -939,22 +1009,61 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
                 let member = &args[i + 1];
                 let entry = store.data.entry(args[1].clone()).or_default();
                 match &mut entry.value {
-                    Value::ZSet(items) => match items.iter_mut().find(|(m, _)| m == member) {
-                        Some((_, s)) => *s = score,
-                        None => {
-                            items.push((member.clone(), score));
-                            added += 1;
+                    Value::ZSet(items) => {
+                        match items.iter_mut().find(|(m, _)| m == member) {
+                            Some((_, s)) => {
+                                if nx {
+                                    if incr {
+                                        return (nil(), false);
+                                    }
+                                } else {
+                                    let next = if incr { *s + score } else { score };
+                                    if *s != next {
+                                        changed += 1;
+                                    }
+                                    *s = next;
+                                    incr_result = Some(next);
+                                }
+                            }
+                            None => {
+                                if xx {
+                                    if incr {
+                                        return (nil(), false);
+                                    }
+                                } else {
+                                    items.push((member.clone(), score));
+                                    added += 1;
+                                    changed += 1;
+                                    incr_result = Some(score);
+                                }
+                            }
                         }
-                    },
+                    }
                     Value::None => {
-                        entry.value = Value::ZSet(vec![(member.clone(), score)]);
-                        added += 1;
+                        if xx {
+                            if incr {
+                                return (nil(), false);
+                            }
+                        } else {
+                            entry.value = Value::ZSet(vec![(member.clone(), score)]);
+                            added += 1;
+                            changed += 1;
+                            incr_result = Some(score);
+                        }
                     }
                     _ => return (wrong_type(), false),
                 }
                 i += 2;
             }
-            (int(added), false)
+
+            if incr {
+                match incr_result {
+                    Some(v) => (bulk(format!("{v}").as_bytes()), false),
+                    None => (nil(), false),
+                }
+            } else {
+                (int(if ch { changed } else { added }), false)
+            }
         }
         "ZREM" => {
             let mut removed = 0;
@@ -1144,6 +1253,907 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
                 }
             }
             (array(vec![bulk(b"0"), array(out)]), false)
+        }
+
+        // ---------- 键/服务器补充命令（对齐 FullRedis 扩展 API） ----------
+        "GETEX" => {
+            let value = store.str_value(&args[1]);
+            if let Some(opt) = args.get(2) {
+                let opt = String::from_utf8_lossy(opt).to_uppercase();
+                match opt.as_str() {
+                    "EX" => {
+                        let secs = parse_i64(&args[3]).unwrap_or(0);
+                        if secs > 0 && let Some(e) = store.get_live(&args[1]) {
+                            e.expire_at = Some(Instant::now() + Duration::from_secs(secs as u64));
+                        }
+                    }
+                    "PX" => {
+                        let ms = parse_i64(&args[3]).unwrap_or(0);
+                        if ms > 0 && let Some(e) = store.get_live(&args[1]) {
+                            e.expire_at = Some(Instant::now() + Duration::from_millis(ms as u64));
+                        }
+                    }
+                    "PERSIST" => {
+                        if let Some(e) = store.get_live(&args[1]) {
+                            e.expire_at = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match value {
+                Some(v) => (bulk(&v), false),
+                None => (nil(), false),
+            }
+        }
+        "EXPIRETIME" | "PEXPIRETIME" => {
+            let now = Instant::now();
+            let reply = match store.get_live(&args[1]) {
+                None => int(-2),
+                Some(e) => match e.expire_at {
+                    None => int(-1),
+                    Some(t) => {
+                        let remain = t.saturating_duration_since(now);
+                        let epoch = SystemTime::now() + remain;
+                        let ms = epoch
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        if cmd == "PEXPIRETIME" {
+                            int(ms)
+                        } else {
+                            int(ms / 1000)
+                        }
+                    }
+                },
+            };
+            (reply, false)
+        }
+        "OBJECT" => {
+            let sub = String::from_utf8_lossy(&args[1]).to_uppercase();
+            match sub.as_str() {
+                "ENCODING" => match store.get_live(&args[2]).map(|e| &e.value) {
+                    Some(Value::Str(_)) => (bulk(b"embstr"), false),
+                    Some(Value::List(_)) => (bulk(b"quicklist"), false),
+                    Some(Value::Hash(_)) => (bulk(b"listpack"), false),
+                    Some(Value::Set(_)) => (bulk(b"hashtable"), false),
+                    Some(Value::ZSet(_)) => (bulk(b"listpack"), false),
+                    Some(Value::Stream(_)) => (bulk(b"stream"), false),
+                    _ => (nil(), false),
+                },
+                "IDLETIME" | "FREQ" => {
+                    if store.get_live(&args[2]).is_some() {
+                        (int(0), false)
+                    } else {
+                        (nil(), false)
+                    }
+                }
+                "REFCOUNT" => (int(1), false),
+                _ => (error("ERR unknown subcommand"), false),
+            }
+        }
+        "BITFIELD" => {
+            let key = args[1].clone();
+            let mut data = store.str_value(&key).unwrap_or_default();
+            let mut results: Vec<Bytes> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                let sub = String::from_utf8_lossy(&args[i]).to_uppercase();
+                match sub.as_str() {
+                    "GET" | "SET" | "INCRBY" => {
+                        let Some((signed, bits)) = args.get(i + 1).and_then(|v| bitfield_type(v)) else {
+                            break;
+                        };
+                        let Some(offset) = args
+                            .get(i + 2)
+                            .and_then(|v| bitfield_offset(v, bits))
+                        else {
+                            break;
+                        };
+                        let old_raw = bits_get(&data, offset, bits);
+                        let old = bits_to_i64(old_raw, signed, bits);
+                        if sub == "GET" {
+                            results.push(bulk(old.to_string().as_bytes()));
+                            i += 3;
+                        } else {
+                            let arg = args.get(i + 3).and_then(|v| parse_i64(v)).unwrap_or(0);
+                            if sub == "SET" {
+                                bits_set(&mut data, offset, bits, arg as u64);
+                                results.push(bulk(old.to_string().as_bytes()));
+                            } else {
+                                // INCRBY：按位宽回绕（与 Redis 默认 WRAP 行为一致）
+                                let width_mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                                let next = old.wrapping_add(arg);
+                                let stored = (next as u64) & width_mask;
+                                bits_set(&mut data, offset, bits, stored);
+                                let shown = bits_to_i64(stored, signed, bits);
+                                results.push(bulk(shown.to_string().as_bytes()));
+                            }
+                            i += 4;
+                        }
+                    }
+                    "OVERFLOW" => i += 2,
+                    _ => break,
+                }
+            }
+            store.set_str(&key, data);
+            (array(results), false)
+        }
+        "SWAPDB" => (ok(), false),
+        "WAIT" => (int(0), false),
+        "REPLICAOF" => (ok(), false),
+
+        // ---------- 哈希补充（Redis 7.4） ----------
+        "HGETDEL" => {
+            // 官方语法：HGETDEL key FIELDS n field...
+            let field = args.get(4).cloned().unwrap_or_default();
+            let old = hash_get(&mut store, &args[1], &field);
+            if old.is_some()
+                && let Some(Value::Hash(items)) = store.get_live(&args[1]).map(|e| &mut e.value)
+            {
+                items.retain(|(k, _)| k != &field);
+            }
+            match old {
+                Some(v) => (bulk(&v), false),
+                None => (nil(), false),
+            }
+        }
+        "HGETEX" => {
+            // 语法：HGETEX key [EX seconds|PERSIST] FIELDS n field...（模拟中忽略过期）
+            let field = args.last().cloned().unwrap_or_default();
+            match hash_get(&mut store, &args[1], &field) {
+                Some(v) => (bulk(&v), false),
+                None => (nil(), false),
+            }
+        }
+
+        // ---------- 列表补充 ----------
+        "LMOVE" | "BLMOVE" => {
+            let src = args[1].clone();
+            let dst = args[2].clone();
+            let from_left = args[3].eq_ignore_ascii_case(b"LEFT");
+            let to_left = args[4].eq_ignore_ascii_case(b"LEFT");
+            let popped = match store.get_live(&src).map(|e| &mut e.value) {
+                Some(Value::List(list)) => {
+                    if from_left {
+                        list.pop_front()
+                    } else {
+                        list.pop_back()
+                    }
+                }
+                _ => None,
+            };
+            match popped {
+                Some(v) => {
+                    let entry = store.data.entry(dst).or_default();
+                    match &mut entry.value {
+                        Value::List(list) => {
+                            if to_left {
+                                list.push_front(v.clone());
+                            } else {
+                                list.push_back(v.clone());
+                            }
+                        }
+                        Value::None => {
+                            let mut list = VecDeque::new();
+                            if to_left {
+                                list.push_front(v.clone());
+                            } else {
+                                list.push_back(v.clone());
+                            }
+                            entry.value = Value::List(list);
+                        }
+                        _ => return (wrong_type(), false),
+                    }
+                    (bulk(&v), false)
+                }
+                None => (nil(), false),
+            }
+        }
+        "LMPOP" => {
+            let numkeys = parse_i64(&args[1]).unwrap_or(0).max(0) as usize;
+            let keys = args[2..(2 + numkeys).min(args.len())].to_vec();
+            let from_left = args.iter().any(|a| a.eq_ignore_ascii_case(b"LEFT"));
+            let count = args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"COUNT"))
+                .map(|i| parse_i64(&args[i + 1]).unwrap_or(1).max(1) as usize)
+                .unwrap_or(1);
+            for key in keys {
+                let mut popped: Vec<Bytes> = Vec::new();
+                if let Some(Value::List(list)) = store.get_live(&key).map(|e| &mut e.value) {
+                    for _ in 0..count.min(list.len()) {
+                        let v = if from_left {
+                            list.pop_front()
+                        } else {
+                            list.pop_back()
+                        };
+                        match v {
+                            Some(v) => popped.push(v),
+                            None => break,
+                        }
+                    }
+                }
+                if !popped.is_empty() {
+                    return (
+                        array(vec![
+                            bulk(&key),
+                            array(popped.iter().map(|v| bulk(v)).collect()),
+                        ]),
+                        false,
+                    );
+                }
+            }
+            (nil(), false)
+        }
+
+        // ---------- 集合补充 ----------
+        "SMISMEMBER" => {
+            let set = match store.get_live(&args[1]).map(|e| &e.value) {
+                Some(Value::Set(s)) => s.clone(),
+                _ => Vec::new(),
+            };
+            let items = args[2..]
+                .iter()
+                .map(|m| int(if set.contains(m) { 1 } else { 0 }))
+                .collect();
+            (array(items), false)
+        }
+        "SINTERCARD" => {
+            let numkeys = parse_i64(&args[1]).unwrap_or(0).max(0) as usize;
+            let keys = args[2..(2 + numkeys).min(args.len())].to_vec();
+            let limit = args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"LIMIT"))
+                .map(|i| parse_i64(&args[i + 1]).unwrap_or(0).max(0) as usize)
+                .unwrap_or(0);
+            let sets: Vec<Vec<Bytes>> = keys
+                .iter()
+                .map(|k| match store.get_live(k).map(|e| &e.value) {
+                    Some(Value::Set(s)) => s.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            let mut count = 0usize;
+            if let Some(first) = sets.first() {
+                count = first
+                    .iter()
+                    .filter(|m| sets[1..].iter().all(|s| s.contains(m)))
+                    .count();
+            }
+            if limit > 0 {
+                count = count.min(limit);
+            }
+            (int(count as i64), false)
+        }
+
+        // ---------- 有序集合补充 ----------
+        "ZMSCORE" => {
+            let items = match store.get_live(&args[1]).map(|e| &e.value) {
+                Some(Value::ZSet(z)) => z.clone(),
+                _ => Vec::new(),
+            };
+            let out = args[2..]
+                .iter()
+                .map(|m| {
+                    items
+                        .iter()
+                        .find(|(mm, _)| mm == m)
+                        .map(|(_, s)| bulk(format!("{s}").as_bytes()))
+                        .unwrap_or_else(nil)
+                })
+                .collect();
+            (array(out), false)
+        }
+        "ZRANDMEMBER" => {
+            let with_scores = args.iter().any(|a| a.eq_ignore_ascii_case(b"WITHSCORES"));
+            let count = args.get(2).and_then(|a| parse_i64(a));
+            let items = match store.get_live(&args[1]).map(|e| &e.value) {
+                Some(Value::ZSet(z)) => z.clone(),
+                _ => Vec::new(),
+            };
+            match count {
+                None => match items.first() {
+                    Some((m, _)) => (bulk(m), false),
+                    None => (nil(), false),
+                },
+                Some(count) => {
+                    let take = count.max(0) as usize;
+                    let mut out = Vec::new();
+                    for (m, s) in items.iter().take(take.min(items.len())) {
+                        out.push(bulk(m));
+                        if with_scores {
+                            out.push(bulk(format!("{s}").as_bytes()));
+                        }
+                    }
+                    (array(out), false)
+                }
+            }
+        }
+        "ZRANGESTORE" => {
+            let dst = args[1].clone();
+            let by_score = args.iter().any(|a| a.eq_ignore_ascii_case(b"BYSCORE"));
+            let rev = args.iter().any(|a| a.eq_ignore_ascii_case(b"REV"));
+            let limit = args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"LIMIT"))
+                .map(|i| {
+                    (
+                        parse_i64(&args[i + 1]).unwrap_or(0).max(0) as usize,
+                        parse_i64(&args[i + 2]).unwrap_or(0).max(0) as usize,
+                    )
+                });
+            let mut sorted = match store.get_live(&args[2]).map(|e| &e.value) {
+                Some(Value::ZSet(z)) => z.clone(),
+                _ => Vec::new(),
+            };
+            sort_zset(&mut sorted);
+            let mut selected: Vec<(Bytes, f64)> = if by_score {
+                let min = parse_score(&args[3]).unwrap_or(f64::NEG_INFINITY);
+                let max = parse_score(&args[4]).unwrap_or(f64::INFINITY);
+                sorted
+                    .into_iter()
+                    .filter(|(_, s)| *s >= min && *s <= max)
+                    .collect()
+            } else {
+                let start = parse_i64(&args[3]).unwrap_or(0);
+                let stop = parse_i64(&args[4]).unwrap_or(-1);
+                let len = sorted.len() as i64;
+                let (s, e) = normalize_range(start, stop, len);
+                if s > e {
+                    Vec::new()
+                } else {
+                    sorted[s as usize..=(e as usize)].to_vec()
+                }
+            };
+            if rev {
+                selected.reverse();
+            }
+            if let Some((offset, count)) = limit {
+                selected = selected
+                    .into_iter()
+                    .skip(offset)
+                    .take(if count == 0 { usize::MAX } else { count })
+                    .collect();
+            }
+            let n = selected.len() as i64;
+            if selected.is_empty() {
+                store.remove(&dst);
+            } else {
+                let entry = store.data.entry(dst).or_default();
+                entry.value = Value::ZSet(selected);
+            }
+            (int(n), false)
+        }
+        "ZDIFF" | "ZDIFFSTORE" => {
+            let store_variant = cmd == "ZDIFFSTORE";
+            let (dst, base) = if store_variant {
+                (Some(args[1].clone()), 2usize)
+            } else {
+                (None, 1usize)
+            };
+            let numkeys = parse_i64(&args[base]).unwrap_or(0).max(0) as usize;
+            let keys = args[(base + 1)..(base + 1 + numkeys).min(args.len())].to_vec();
+            let with_scores = args.iter().any(|a| a.eq_ignore_ascii_case(b"WITHSCORES"));
+            let sets: Vec<Vec<(Bytes, f64)>> = keys
+                .iter()
+                .map(|k| match store.get_live(k).map(|e| &e.value) {
+                    Some(Value::ZSet(z)) => z.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            let mut result: Vec<(Bytes, f64)> = Vec::new();
+            if let Some(first) = sets.first() {
+                for (m, s) in first {
+                    if !sets[1..].iter().any(|z| z.iter().any(|(mm, _)| mm == m)) {
+                        result.push((m.clone(), *s));
+                    }
+                }
+            }
+            sort_zset(&mut result);
+            if let Some(dst) = dst {
+                let n = result.len() as i64;
+                if result.is_empty() {
+                    store.remove(&dst);
+                } else {
+                    let entry = store.data.entry(dst).or_default();
+                    entry.value = Value::ZSet(result);
+                }
+                (int(n), false)
+            } else {
+                let items: Vec<Bytes> = result
+                    .iter()
+                    .flat_map(|(m, s)| {
+                        let mut v = vec![bulk(m)];
+                        if with_scores {
+                            v.push(bulk(format!("{s}").as_bytes()));
+                        }
+                        v
+                    })
+                    .collect();
+                (array(items), false)
+            }
+        }
+        "ZUNION" | "ZUNIONSTORE" | "ZINTER" | "ZINTERSTORE" => {
+            let store_variant = cmd.ends_with("STORE");
+            let is_union = cmd.starts_with("ZUNION");
+            let (dst, base) = if store_variant {
+                (Some(args[1].clone()), 2usize)
+            } else {
+                (None, 1usize)
+            };
+            let numkeys = parse_i64(&args[base]).unwrap_or(0).max(0) as usize;
+            let keys = args[(base + 1)..(base + 1 + numkeys).min(args.len())].to_vec();
+            let weights: Vec<f64> = match args.iter().position(|a| a.eq_ignore_ascii_case(b"WEIGHTS")) {
+                Some(i) => (0..numkeys)
+                    .map(|j| args.get(i + 1 + j).and_then(|a| parse_f64(a)).unwrap_or(1.0))
+                    .collect(),
+                None => vec![1.0; numkeys],
+            };
+            let aggregate = args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"AGGREGATE"))
+                .map(|i| String::from_utf8_lossy(&args[i + 1]).to_uppercase())
+                .unwrap_or_else(|| "SUM".to_string());
+            let with_scores = args.iter().any(|a| a.eq_ignore_ascii_case(b"WITHSCORES"));
+            let sets: Vec<Vec<(Bytes, f64)>> = keys
+                .iter()
+                .map(|k| match store.get_live(k).map(|e| &e.value) {
+                    Some(Value::ZSet(z)) => z.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+
+            let mut result: Vec<(Bytes, f64)> = Vec::new();
+            if is_union {
+                for (i, set) in sets.iter().enumerate() {
+                    let weight = weights.get(i).copied().unwrap_or(1.0);
+                    for (m, s) in set {
+                        let weighted = s * weight;
+                        match result.iter_mut().find(|(mm, _)| mm == m) {
+                            Some((_, acc)) => *acc = aggregate_scores(&aggregate, *acc, weighted),
+                            None => result.push((m.clone(), weighted)),
+                        }
+                    }
+                }
+            } else if let Some(first) = sets.first() {
+                for (m, s) in first {
+                    let mut acc = s * weights.first().copied().unwrap_or(1.0);
+                    let mut present = true;
+                    for (i, set) in sets.iter().enumerate().skip(1) {
+                        match set.iter().find(|(mm, _)| mm == m) {
+                            Some((_, s2)) => {
+                                acc = aggregate_scores(
+                                    &aggregate,
+                                    acc,
+                                    s2 * weights.get(i).copied().unwrap_or(1.0),
+                                );
+                            }
+                            None => {
+                                present = false;
+                                break;
+                            }
+                        }
+                    }
+                    if present {
+                        result.push((m.clone(), acc));
+                    }
+                }
+            }
+            sort_zset(&mut result);
+            if let Some(dst) = dst {
+                let n = result.len() as i64;
+                if result.is_empty() {
+                    store.remove(&dst);
+                } else {
+                    let entry = store.data.entry(dst).or_default();
+                    entry.value = Value::ZSet(result);
+                }
+                (int(n), false)
+            } else {
+                let items: Vec<Bytes> = result
+                    .iter()
+                    .flat_map(|(m, s)| {
+                        let mut v = vec![bulk(m)];
+                        if with_scores {
+                            v.push(bulk(format!("{s}").as_bytes()));
+                        }
+                        v
+                    })
+                    .collect();
+                (array(items), false)
+            }
+        }
+        "ZMPOP" => {
+            let numkeys = parse_i64(&args[1]).unwrap_or(0).max(0) as usize;
+            let keys = args[2..(2 + numkeys).min(args.len())].to_vec();
+            let min = args.iter().any(|a| a.eq_ignore_ascii_case(b"MIN"));
+            let count = args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"COUNT"))
+                .map(|i| parse_i64(&args[i + 1]).unwrap_or(1).max(1) as usize)
+                .unwrap_or(1);
+            for key in keys {
+                let mut popped: Vec<(Bytes, f64)> = Vec::new();
+                if let Some(Value::ZSet(items)) = store.get_live(&key).map(|e| &mut e.value) {
+                    sort_zset(items);
+                    for _ in 0..count.min(items.len()) {
+                        let idx = if min { 0 } else { items.len() - 1 };
+                        popped.push(items.remove(idx));
+                    }
+                }
+                if !popped.is_empty() {
+                    let pairs: Vec<Bytes> = popped
+                        .iter()
+                        .map(|(m, s)| array(vec![bulk(m), bulk(format!("{s}").as_bytes())]))
+                        .collect();
+                    return (array(vec![bulk(&key), array(pairs)]), false);
+                }
+            }
+            (nil(), false)
+        }
+        "BZPOPMIN" | "BZPOPMAX" => {
+            let keys = &args[1..args.len().saturating_sub(1)];
+            for key in keys {
+                let popped = match store.get_live(key).map(|e| &mut e.value) {
+                    Some(Value::ZSet(items)) => {
+                        sort_zset(items);
+                        if items.is_empty() {
+                            None
+                        } else {
+                            let idx = if cmd == "BZPOPMIN" { 0 } else { items.len() - 1 };
+                            Some(items.remove(idx))
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((m, s)) = popped {
+                    return (
+                        array(vec![
+                            bulk(key),
+                            bulk(&m),
+                            bulk(format!("{s}").as_bytes()),
+                        ]),
+                        false,
+                    );
+                }
+            }
+            (nil(), false)
+        }
+
+        // ---------- Tair 扩展（EX*，仅阿里云 Tair 可用） ----------
+        "EXSET" => {
+            store.set_str(&args[1], args[2].clone());
+            let ver = {
+                let v = store.ex_versions.entry(args[1].clone()).or_insert(0);
+                *v += 1;
+                *v
+            };
+            let _ = ver;
+            if let Some(pos) = args.iter().position(|a| a.eq_ignore_ascii_case(b"EX")) {
+                let secs = parse_i64(&args[pos + 1]).unwrap_or(0);
+                if secs > 0
+                    && let Some(e) = store.get_live(&args[1])
+                {
+                    e.expire_at = Some(Instant::now() + Duration::from_secs(secs as u64));
+                }
+            }
+            (ok(), false)
+        }
+        "EXGET" => {
+            let value = store.str_value(&args[1]);
+            let ver = store.ex_versions.get(&args[1]).copied().unwrap_or(0);
+            match value {
+                Some(v) => (array(vec![bulk(&v), int(ver)]), false),
+                None => (array(vec![nil(), int(ver)]), false),
+            }
+        }
+        "EXINCRBY" => {
+            let delta = parse_i64(&args[2]).unwrap_or(0);
+            let current = store
+                .str_value(&args[1])
+                .and_then(|v| parse_i64(&v))
+                .unwrap_or(0);
+            let next = current + delta;
+            store.set_str(&args[1], next.to_string().into_bytes());
+            let ver = {
+                let v = store.ex_versions.entry(args[1].clone()).or_insert(0);
+                *v += 1;
+                *v
+            };
+            if let Some(pos) = args.iter().position(|a| a.eq_ignore_ascii_case(b"EX")) {
+                let secs = parse_i64(&args[pos + 1]).unwrap_or(0);
+                if secs > 0
+                    && let Some(e) = store.get_live(&args[1])
+                {
+                    e.expire_at = Some(Instant::now() + Duration::from_secs(secs as u64));
+                }
+            }
+            (array(vec![int(next), int(ver)]), false)
+        }
+        "EXHSET" => {
+            let field = args[2].clone();
+            let value = args[3].clone();
+            let mut nx = false;
+            let mut i = 4;
+            while i < args.len() {
+                match String::from_utf8_lossy(&args[i]).to_uppercase().as_str() {
+                    "EX" | "VER" => i += 2,
+                    "NX" => {
+                        nx = true;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let exists = hash_get(&mut store, &args[1], &field).is_some();
+            if nx && exists {
+                (int(0), false)
+            } else {
+                let created = if exists { 0 } else { 1 };
+                hash_set(&mut store, &args[1], vec![field.clone(), value]);
+                let fv = store
+                    .ex_field_versions
+                    .entry((args[1].clone(), field))
+                    .or_insert(0);
+                *fv += 1;
+                (int(created), false)
+            }
+        }
+        "EXHGET" => match hash_get(&mut store, &args[1], &args[2]) {
+            Some(v) => (bulk(&v), false),
+            None => (nil(), false),
+        },
+        "EXHMGET" => {
+            let items = args[2..]
+                .iter()
+                .map(|f| match hash_get(&mut store, &args[1], f) {
+                    Some(v) => bulk(&v),
+                    None => nil(),
+                })
+                .collect();
+            (array(items), false)
+        }
+        "EXHGETWITHVER" => match hash_get(&mut store, &args[1], &args[2]) {
+            Some(v) => {
+                let ver = store
+                    .ex_field_versions
+                    .get(&(args[1].clone(), args[2].clone()))
+                    .copied()
+                    .unwrap_or(0);
+                (array(vec![bulk(&v), int(ver)]), false)
+            }
+            None => (nil(), false),
+        },
+        "EXHINCRBY" => {
+            let delta = parse_i64(&args[3]).unwrap_or(0);
+            let current = hash_get(&mut store, &args[1], &args[2])
+                .and_then(|v| parse_i64(&v))
+                .unwrap_or(0);
+            let next = current + delta;
+            hash_set(
+                &mut store,
+                &args[1],
+                vec![args[2].clone(), next.to_string().into_bytes()],
+            );
+            (int(next), false)
+        }
+        "EXHPTTL" => match hash_get(&mut store, &args[1], &args[2]) {
+            Some(_) => (int(-1), false),
+            None => (int(-2), false),
+        },
+        "EXHKEYS" | "EXHVALS" => {
+            let items = match store.get_live(&args[1]).map(|e| &e.value) {
+                Some(Value::Hash(items)) => items
+                    .iter()
+                    .map(|(k, v)| bulk(if cmd == "EXHKEYS" { k } else { v }))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            (array(items), false)
+        }
+        "EXHLEN" => {
+            let len = match store.get_live(&args[1]).map(|e| &e.value) {
+                Some(Value::Hash(items)) => items.len() as i64,
+                _ => 0,
+            };
+            (int(len), false)
+        }
+        "EXHDEL" => {
+            let mut n = 0;
+            if let Some(Value::Hash(items)) = store.get_live(&args[1]).map(|e| &mut e.value) {
+                for field in &args[2..] {
+                    let before = items.len();
+                    items.retain(|(k, _)| k != field);
+                    if items.len() != before {
+                        n += 1;
+                    }
+                }
+            }
+            (int(n), false)
+        }
+
+        // ---------- 脚本与函数 ----------
+        "EVAL" => {
+            let script = String::from_utf8_lossy(&args[1]).to_lowercase();
+            let numkeys = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
+            let key_end = (3 + numkeys).min(args.len());
+            let keys = args[3..key_end].to_vec();
+            let argv = args[key_end..].to_vec();
+
+            if script.contains("redis.call('get'") && script.contains("redis.call('del'") {
+                // 比较并删除（CacheLock / RedLock 解锁脚本）
+                let matched = match (keys.first(), argv.first()) {
+                    (Some(k), Some(t)) => store.str_value(k).map(|v| v == *t).unwrap_or(false),
+                    _ => false,
+                };
+                if matched {
+                    if let Some(k) = keys.first() {
+                        store.remove(k);
+                    }
+                    (int(1), false)
+                } else {
+                    (int(0), false)
+                }
+            } else if script.contains("return argv[1]") {
+                match argv.first() {
+                    Some(v) => (bulk(v), false),
+                    None => (nil(), false),
+                }
+            } else if script.contains("return keys[1]") {
+                match keys.first() {
+                    Some(v) => (bulk(v), false),
+                    None => (nil(), false),
+                }
+            } else if script.contains("return 1") {
+                (int(1), false)
+            } else {
+                (nil(), false)
+            }
+        }
+        "FUNCTION" => {
+            let sub = String::from_utf8_lossy(&args[1]).to_uppercase();
+            match sub.as_str() {
+                "LOAD" => {
+                    let code = String::from_utf8_lossy(args.last().map(|v| v.as_slice()).unwrap_or_default())
+                        .to_string();
+                    let name = code
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split("name=").nth(1))
+                        .map(|s| s.split_whitespace().next().unwrap_or("lib").to_string())
+                        .unwrap_or_else(|| "mini_lib".to_string());
+                    if !store.functions.contains(&name) {
+                        store.functions.push(name.clone());
+                    }
+                    (bulk(name.as_bytes()), false)
+                }
+                "LIST" => {
+                    let filter = args
+                        .iter()
+                        .position(|a| a.eq_ignore_ascii_case(b"LIBRARYNAME"))
+                        .and_then(|i| args.get(i + 1).cloned());
+                    let libs: Vec<Bytes> = store
+                        .functions
+                        .iter()
+                        .filter(|n| filter.as_ref().map(|f| f.as_slice() == n.as_bytes()).unwrap_or(true))
+                        .map(|n| {
+                            array(vec![
+                                bulk(b"library_name"),
+                                bulk(n.as_bytes()),
+                                bulk(b"engine"),
+                                bulk(b"LUA"),
+                            ])
+                        })
+                        .collect();
+                    (array(libs), false)
+                }
+                "DELETE" => {
+                    let name = String::from_utf8_lossy(&args[2]).to_string();
+                    let before = store.functions.len();
+                    store.functions.retain(|n| n != &name);
+                    if store.functions.len() == before {
+                        (error("ERR Library not found"), false)
+                    } else {
+                        (ok(), false)
+                    }
+                }
+                _ => (error("ERR unknown subcommand"), false),
+            }
+        }
+        "FCALL" | "FCALL_RO" => {
+            let function = String::from_utf8_lossy(&args[1]).to_string();
+            let numkeys = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
+            if function.contains("echo") {
+                match args.get(3 + numkeys).cloned() {
+                    Some(v) => (bulk(&v), false),
+                    None => (nil(), false),
+                }
+            } else {
+                (bulk(function.as_bytes()), false)
+            }
+        }
+
+        // ---------- 运维命令 ----------
+        "SLOWLOG" => {
+            let sub = String::from_utf8_lossy(&args[1]).to_uppercase();
+            match sub.as_str() {
+                "LEN" => (int(store.slowlog.len() as i64), false),
+                "RESET" => {
+                    store.slowlog.clear();
+                    (ok(), false)
+                }
+                "GET" => {
+                    let count = args
+                        .get(2)
+                        .and_then(|a| parse_i64(a))
+                        .unwrap_or(10)
+                        .max(0) as usize;
+                    let entries: Vec<Bytes> = store
+                        .slowlog
+                        .iter()
+                        .rev()
+                        .take(count)
+                        .map(|e| {
+                            array(vec![
+                                int(e.id),
+                                int(e.timestamp),
+                                int(e.duration_us),
+                                array(e.command.iter().map(|c| bulk(c)).collect()),
+                                bulk(b"127.0.0.1:0"),
+                                bulk(b""),
+                            ])
+                        })
+                        .collect();
+                    (array(entries), false)
+                }
+                _ => (error("ERR unknown subcommand"), false),
+            }
+        }
+        "LATENCY" => {
+            let sub = String::from_utf8_lossy(&args[1]).to_uppercase();
+            match sub.as_str() {
+                "HISTORY" => {
+                    let event = String::from_utf8_lossy(&args[2]).to_string();
+                    let items: Vec<Bytes> = store
+                        .latency
+                        .iter()
+                        .filter(|(e, _, _, _)| e == &event)
+                        .map(|(_, ts, latest, _)| array(vec![int(*ts), int(*latest)]))
+                        .collect();
+                    (array(items), false)
+                }
+                "LATEST" => {
+                    let items: Vec<Bytes> = store
+                        .latency
+                        .iter()
+                        .map(|(e, ts, latest, max)| {
+                            array(vec![
+                                bulk(e.as_bytes()),
+                                int(*ts),
+                                int(*latest),
+                                int(*max),
+                            ])
+                        })
+                        .collect();
+                    (array(items), false)
+                }
+                "RESET" => {
+                    let before = store.latency.len();
+                    if args.len() > 2 {
+                        let events: Vec<String> = args[2..]
+                            .iter()
+                            .map(|a| String::from_utf8_lossy(a).to_string())
+                            .collect();
+                        store.latency.retain(|(e, _, _, _)| !events.contains(e));
+                    } else {
+                        store.latency.clear();
+                    }
+                    (int((before - store.latency.len()) as i64), false)
+                }
+                "DOCTOR" => (bulk(b"Dave, I have observed some latency spikes."), false),
+                _ => (error("ERR unknown subcommand"), false),
+            }
         }
 
         // ---------- HyperLogLog（测试用精确集合模拟） ----------
@@ -2101,5 +3111,108 @@ pub fn list_len(server: &MockRedis, key: &str) -> usize {
     match store.get_live(key.as_bytes()).map(|e| &e.value) {
         Some(Value::List(l)) => l.len(),
         _ => 0,
+    }
+}
+
+/// 预置一条慢日志记录（供 `SLOWLOG GET` 测试）。
+#[allow(clippy::too_many_arguments)]
+pub fn seed_slowlog(
+    server: &MockRedis,
+    id: i64,
+    timestamp: i64,
+    duration_us: i64,
+    command: &[&str],
+) {
+    let mut store = server.store.lock().unwrap();
+    store.slowlog.push(MockSlowlogEntry {
+        id,
+        timestamp,
+        duration_us,
+        command: command.iter().map(|c| c.as_bytes().to_vec()).collect(),
+    });
+}
+
+/// 预置延迟统计（供 `LATENCY` 测试）。
+pub fn seed_latency(server: &MockRedis, event: &str, timestamp: i64, latest: i64, max: i64) {
+    let mut store = server.store.lock().unwrap();
+    store.latency.push((event.to_string(), timestamp, latest, max));
+}
+
+/// 按分数（同分按成员字典序）排序 zset。
+fn sort_zset(items: &mut [(Bytes, f64)]) {
+    items.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+}
+
+/// `ZUNION`/`ZINTER` 的聚合函数。
+fn aggregate_scores(aggregate: &str, a: f64, b: f64) -> f64 {
+    match aggregate {
+        "MIN" => a.min(b),
+        "MAX" => a.max(b),
+        _ => a + b,
+    }
+}
+
+/// 解析 `BITFIELD` 类型串（`u8`/`i64` 等）。
+fn bitfield_type(text: &[u8]) -> Option<(bool, u32)> {
+    let s = std::str::from_utf8(text).ok()?;
+    let mut chars = s.chars();
+    let signed = match chars.next()? {
+        'u' | 'U' => false,
+        'i' | 'I' => true,
+        _ => return None,
+    };
+    let bits: u32 = chars.as_str().parse().ok()?;
+    matches!(bits, 8 | 16 | 32 | 64).then_some((signed, bits))
+}
+
+/// 解析 `BITFIELD` 偏移（`#n` 表示第 n 个字段）。
+fn bitfield_offset(text: &[u8], bits: u32) -> Option<usize> {
+    let s = std::str::from_utf8(text).ok()?;
+    match s.strip_prefix('#') {
+        Some(rest) => rest.parse::<usize>().ok().map(|n| n * bits as usize),
+        None => s.parse().ok(),
+    }
+}
+
+/// 读取位域（大端位序，越界按 0）。
+fn bits_get(data: &[u8], offset: usize, bits: u32) -> u64 {
+    let mut v = 0u64;
+    for i in 0..bits as usize {
+        let bit_index = offset + i;
+        let byte = data.get(bit_index / 8).copied().unwrap_or(0);
+        let bit = (byte >> (7 - (bit_index % 8))) & 1;
+        v = (v << 1) | bit as u64;
+    }
+    v
+}
+
+/// 写入位域（大端位序，自动扩容）。
+fn bits_set(data: &mut Vec<u8>, offset: usize, bits: u32, value: u64) {
+    let need = (offset + bits as usize).div_ceil(8);
+    if data.len() < need {
+        data.resize(need, 0);
+    }
+    for i in 0..bits as usize {
+        let bit_index = offset + i;
+        let bit = ((value >> (bits as usize - 1 - i)) & 1) as u8;
+        let mask = 1u8 << (7 - (bit_index % 8));
+        if bit == 1 {
+            data[bit_index / 8] |= mask;
+        } else {
+            data[bit_index / 8] &= !mask;
+        }
+    }
+}
+
+/// 按有无符号把位域原始值转为 `i64`。
+fn bits_to_i64(raw: u64, signed: bool, bits: u32) -> i64 {
+    if signed && bits < 64 && (raw >> (bits - 1)) & 1 == 1 {
+        (raw as i64) - (1i64 << bits)
+    } else {
+        raw as i64
     }
 }

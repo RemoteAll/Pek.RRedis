@@ -140,6 +140,57 @@ where
         Ok(int_or(self.redis.redis().execute(&refs)?, 0))
     }
 
+    /// 弹出字段（`HGETDEL key FIELDS 1 field`，Redis 7.4+），返回旧值并删除字段（对应 C# `HGetDel`）。
+    ///
+    /// 注：DH.NRedis `HGetDel` 发送的是 `HGETDEL key field`（缺少 `FIELDS 1` 参数），
+    /// 对真实 Redis 会报语法错误；Rust 侧按官方语法实现。
+    pub fn hgetdel(&self, field: &K) -> Result<Option<V>>
+    where
+        K: ToRedisPayload,
+    {
+        let field = payload(field)?;
+        let rs = self.redis.redis().execute(&[
+            b"HGETDEL",
+            self.key.as_bytes(),
+            b"FIELDS",
+            b"1",
+            &field,
+        ])?;
+        Ok(decode(rs))
+    }
+
+    /// 读取字段并设置字段级过期（`HGETEX ... EX seconds FIELDS 1 field`，Redis 7.4+，对应 C# `HGetEx`）。
+    ///
+    /// `expire_seconds = 0` 时发送 `PERSIST` 移除字段过期时间。
+    pub fn hgetex(&self, field: &K, expire_seconds: i64) -> Result<Option<V>>
+    where
+        K: ToRedisPayload,
+    {
+        let field = payload(field)?;
+        let expire = expire_seconds.to_string();
+        let rs = if expire_seconds > 0 {
+            self.redis.redis().execute(&[
+                b"HGETEX",
+                self.key.as_bytes(),
+                b"EX",
+                expire.as_bytes(),
+                b"FIELDS",
+                b"1",
+                &field,
+            ])?
+        } else {
+            self.redis.redis().execute(&[
+                b"HGETEX",
+                self.key.as_bytes(),
+                b"PERSIST",
+                b"FIELDS",
+                b"1",
+                &field,
+            ])?
+        };
+        Ok(decode(rs))
+    }
+
     /// 获取全部字段值（`HGETALL`），保持返回顺序。
     pub fn get_all(&self) -> Result<FieldPairs<K, V>> {
         let rs = self

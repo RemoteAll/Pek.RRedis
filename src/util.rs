@@ -71,6 +71,21 @@ pub(crate) fn decode_scored<T: FromRedisPayload>(value: RespValue) -> Vec<(T, f6
     result
 }
 
+/// 嵌套数组 `[[m1, s1], [m2, s2], ...]` 转「成员 + 分数」列表（`ZMPOP` 等多键弹出应答）。
+pub(crate) fn decode_scored_pairs<T: FromRedisPayload>(value: RespValue) -> Vec<(T, f64)> {
+    value
+        .into_array()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|pair| {
+            let mut items = pair.into_array()?.into_iter();
+            let member = decode::<T>(items.next()?)?;
+            let score = items.next().and_then(|v| v.as_f64()).unwrap_or(0.0);
+            Some((member, score))
+        })
+        .collect()
+}
+
 /// 字符串数组转 `Vec<String>`。
 pub(crate) fn strings(value: RespValue) -> Vec<String> {
     value

@@ -813,6 +813,40 @@ impl Redis {
         Ok(self.info()?.get("redis_version").cloned())
     }
 
+    /// 服务器版本号元组 `(major, minor, patch)`，解析失败返回 `(0, 0, 0)`。
+    ///
+    /// 与 C# `Redis.Version` 一致：部分兼容实现（Garnet/Pika）版本号可能非标准，解析失败视为 0。
+    pub fn version_parts(&self) -> Result<(u32, u32, u32)> {
+        Ok(parse_version_parts(self.version()?.as_deref().unwrap_or("")))
+    }
+
+    /// 版本门禁：低于要求版本时返回 [`Error::Unsupported`]（对应 C# `RequireVersion`）。
+    pub fn require_version(&self, required: &str, command: &str) -> Result<()> {
+        let (rm, rn, rp) = parse_version_parts(required);
+        let (m, n, p) = self.version_parts()?;
+        if (m, n, p) < (rm, rn, rp) {
+            return Err(Error::Unsupported(format!(
+                "命令 {command} 需要 Redis {required}+ 版本，当前服务器版本: {m}.{n}.{p}。请升级 Redis 或使用兼容版本。"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 服务器类型（对应 C# `Redis.ServerType`，依据 `INFO` 探测 Garnet/Pika/Dragonfly 等兼容实现）。
+    pub fn server_type(&self) -> Result<ServerType> {
+        let info = self.info()?;
+        Ok(detect_server_type(&info))
+    }
+
+    /// `INFO all`，解析为字典（对应 C# `GetInfo(all: true)`）。
+    pub fn info_all(&self) -> Result<HashMap<String, String>> {
+        let text = self
+            .execute(&[b"INFO", b"all"])?
+            .as_string()
+            .unwrap_or_default();
+        Ok(parse_info(&text))
+    }
+
     /// 当前服务器时间（`TIME`）：`(秒, 微秒)`。
     pub fn time(&self) -> Result<(i64, i64)> {
         let items = self
@@ -996,6 +1030,76 @@ pub fn parse_info(text: &str) -> HashMap<String, String> {
         }
     }
     dic
+}
+
+/// 服务器类型（对应 C# `ServerType`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerType {
+    /// 未知类型
+    Unknown = 0,
+    /// 标准 Redis 服务器
+    Redis = 1,
+    /// Garnet 服务器（微软的 Redis 兼容实现）
+    Garnet = 2,
+    /// Pika 服务器（RocksDB 存储引擎兼容实现）
+    Pika = 3,
+    /// DragonflyDB（新型高性能 Redis 兼容数据库）
+    DragonflyDb = 4,
+    /// 华为云 DCS 集群版
+    HuaweiCloud = 10,
+    /// 阿里云 KVStore（Tair）
+    AlibabaCloud = 11,
+    /// 腾讯云 Redis
+    TencentCloud = 12,
+}
+
+/// 解析版本号文本（`"7.2.4"` / `"Garnet/1.0"` → 最多取 3 段数字）。
+pub fn parse_version_parts(text: &str) -> (u32, u32, u32) {
+    let mut parts = [0u32; 3];
+    let mut idx = 0;
+    for seg in text.split(['.', '-', '/', '+']) {
+        if idx >= 3 {
+            break;
+        }
+        let digits: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            if idx == 0 && !seg.is_empty() {
+                // 首段不是数字（如 "Garnet"），继续看后续段
+                continue;
+            }
+            break;
+        }
+        parts[idx] = digits.parse().unwrap_or(0);
+        idx += 1;
+    }
+    (parts[0], parts[1], parts[2])
+}
+
+/// 从 `INFO` 结果探测服务器类型（与 C# `Redis.DetectServerType` 一致）。
+pub fn detect_server_type(info: &HashMap<String, String>) -> ServerType {
+    let redis_version = info.get("redis_version").map(|s| s.as_str()).unwrap_or("");
+    let server = info.get("server").map(|s| s.as_str()).unwrap_or("");
+    let os = info.get("os").map(|s| s.as_str()).unwrap_or("");
+
+    if redis_version.contains("Garnet") || server.contains("Garnet") {
+        return ServerType::Garnet;
+    }
+    if redis_version.to_ascii_lowercase().contains("pika") || server.contains("Pika") {
+        return ServerType::Pika;
+    }
+    if server.to_ascii_lowercase().contains("dragonfly") {
+        return ServerType::DragonflyDb;
+    }
+    if os.contains("Huawei") {
+        return ServerType::HuaweiCloud;
+    }
+    if server.contains("Tair") || server.contains("Alibaba") {
+        return ServerType::AlibabaCloud;
+    }
+    if server.contains("Tencent") {
+        return ServerType::TencentCloud;
+    }
+    ServerType::Redis
 }
 
 #[cfg(test)]

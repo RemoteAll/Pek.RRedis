@@ -11,6 +11,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -311,6 +312,134 @@ where
         Ok(Some(result))
     }
 
+    /// 类型化大循环消费（对应 C# `QueueExtensions.ConsumeAsync<T>`）：
+    /// 取出 JSON 消息 → 反序列化为 `T` → 交给 `on_message` 处理 → 成功后自动确认。
+    ///
+    /// 与 C# 完全一致的行为：
+    /// - 处理失败（或 JSON 解析失败）时消息**不确认**，等待
+    ///   [`RedisReliableQueue::retry_ack`] 在重试窗口后回滚重投；
+    /// - 同时在**备份库**（`db == 15 ? 0 : db + 1`）的 `{topic}:Error:{id}` 计数 +1
+    ///   （TTL 30 天）；同一消息累计失败 ≥ 10 次后自动确认（丢弃），避免毒消息死循环；
+    /// - 消息标识依次取 `id_field`（若指定）、`Id`、`guid`、`OrderId`、`Code`，
+    ///   均缺失时回退为消息体 MD5（与 C# `mqMsg.MD5()` 相同算法）。
+    ///
+    /// `poll_interval` 为无消息时的休眠间隔（C# 固定 1 秒，Rust 侧可调便于测试）。
+    pub fn consume_json<T, F>(
+        &self,
+        timeout_seconds: i64,
+        poll_interval: Duration,
+        id_field: Option<&str>,
+        cancel: &AtomicBool,
+        mut on_message: F,
+    ) -> Result<()>
+    where
+        T: serde::de::DeserializeOwned,
+        F: FnMut(&T, &str) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let mut id_fields: Vec<&str> = vec!["Id", "guid", "OrderId", "Code"];
+        if let Some(id_field) = id_field.filter(|f| !f.is_empty() && !id_fields.contains(f)) {
+            id_fields.insert(0, id_field);
+        }
+
+        // 备份库：错误计数与 C# 相同落在 db + 1（db == 15 时回到 0）
+        let db = self.redis.redis().options().db;
+        let bak_db = if db == 15 { 0 } else { db + 1 };
+        let bak = self.redis.redis().create_sub(bak_db)?;
+
+        while !cancel.load(Ordering::Relaxed) {
+            let Some(raw) = self.take_one_string(timeout_seconds)? else {
+                sleep(poll_interval);
+                continue;
+            };
+
+            // 消息标识：字段优先，缺失时用消息体 MD5（与 C# 相同）
+            let value = serde_json::from_str::<serde_json::Value>(&raw).ok();
+            let mut msg_id = value
+                .as_ref()
+                .and_then(|v| extract_message_id(v, &id_fields))
+                .unwrap_or_default();
+            if msg_id.is_empty() {
+                msg_id = format!("{:x}", md5::compute(raw.as_bytes()));
+            }
+
+            let result = match value.as_ref() {
+                Some(value) => match serde_json::from_value::<T>(value.clone()) {
+                    Ok(message) => on_message(&message, &raw),
+                    Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+                },
+                None => Err(Box::new(std::io::Error::other(format!(
+                    "JSON 解析失败: {raw}"
+                ))) as Box<dyn std::error::Error + Send + Sync>),
+            };
+
+            match result {
+                Ok(()) => {
+                    self.redis.redis().remove(&raw)?;
+                    self.acknowledge(&[&raw])?;
+                }
+                Err(_) => {
+                    // 错误次数达到 10 次则确认丢弃（与 C# 一致）
+                    let error_key = format!("{}:Error:{}", self.key, msg_id);
+                    let count = bak.increment(&error_key, 1)?;
+                    if count < 10 {
+                        bak.set_expire(&error_key, 30 * 24 * 3600)?;
+                    } else {
+                        self.redis.redis().remove(&raw)?;
+                        self.acknowledge(&[&raw])?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 字符串大循环消费（对应 C# `QueueExtensions.ConsumeAsync<T>(Action<String>)` 重载）：
+    /// 直接把原始消息字符串交给 `on_message`，成功后自动确认。
+    ///
+    /// 失败处理与 [`RedisReliableQueue::consume_json`] 完全一致（错误计数、10 次后丢弃）。
+    pub fn consume_raw<F>(
+        &self,
+        timeout_seconds: i64,
+        poll_interval: Duration,
+        cancel: &AtomicBool,
+        mut on_message: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let db = self.redis.redis().options().db;
+        let bak_db = if db == 15 { 0 } else { db + 1 };
+        let bak = self.redis.redis().create_sub(bak_db)?;
+
+        while !cancel.load(Ordering::Relaxed) {
+            let Some(raw) = self.take_one_string(timeout_seconds)? else {
+                sleep(poll_interval);
+                continue;
+            };
+
+            match on_message(&raw) {
+                Ok(()) => {
+                    self.redis.redis().remove(&raw)?;
+                    self.acknowledge(&[&raw])?;
+                }
+                Err(_) => {
+                    let msg_id = format!("{:x}", md5::compute(raw.as_bytes()));
+                    let error_key = format!("{}:Error:{}", self.key, msg_id);
+                    let count = bak.increment(&error_key, 1)?;
+                    if count < 10 {
+                        bak.set_expire(&error_key, 30 * 24 * 3600)?;
+                    } else {
+                        self.redis.redis().remove(&raw)?;
+                        self.acknowledge(&[&raw])?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn take_one_string(&self, timeout_seconds: i64) -> Result<Option<String>> {
         self.retry_ack()?;
 
@@ -465,4 +594,22 @@ where
     pub fn add_delay(&self, value: &V, delay_seconds: i64) -> Result<i64> {
         self.delay_queue().add(value, delay_seconds)
     }
+}
+
+/// 从 JSON 对象中按候选字段名依次提取消息标识（对应 C# `QueueExtensions` 的 `ids` 轮询逻辑）。
+fn extract_message_id(value: &serde_json::Value, fields: &[&str]) -> Option<String> {
+    let obj = value.as_object()?;
+    for field in fields {
+        if let Some(v) = obj.get(*field) {
+            let text = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => continue,
+                other => other.to_string(),
+            };
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }
