@@ -140,7 +140,7 @@ dotnet run --project demo\csharp\PekRRedisDemo -- stream-status --config "<confi
 
 ---
 
-## 四、本次实测结论（2026-09-26，本机）
+## 四、本次实测结论（2026-09-27，本机）
 
 用内置迷你 Redis 完成的双向验证（C# 进程 ↔ RESP ↔ Rust 进程）：
 
@@ -151,6 +151,7 @@ dotnet run --project demo\csharp\PekRRedisDemo -- stream-status --config "<confi
   Rust 写入 3 条 → C# 消费并确认；C# 消费 2 条不确认 → Rust `--retry-seconds 0` 通过 `XPENDING`+`XCLAIM` 抢回并确认，双方 `stream-status` 互认消费者与挂起数（挂起归零）；
 - 延迟队列：C# 写入 3 条（delay=2s）→ Rust 到期后全部取到；Rust 写入 2 条 → C# 到期后全部取到（`score = Unix 秒 + 延迟` 两端一致）；
 - 分布式锁：C# 持锁期间 Rust 抢锁失败（`✘ 未拿到锁`），C# 释放后 Rust 立即拿到；锁值两种格式（旧包纯数字 / 新 `token|tick`）互相兼容；
+- PubSub：普通订阅（C# `SUBSCRIBE` ← Rust `PUBLISH`）、模式订阅（Rust `PSUBSCRIBE` ← C# `PUBLISH`）、分片订阅（C# `SSUBSCRIBE` ← Rust `SPUBLISH`）均已实跑，发布端 `delivered=1`，订阅端成功收到预期频道与消息；
 - 双方 receipt 互读，`Failures` 均为空。
 
 ## 五、实测发现（写文档/排查时注意）

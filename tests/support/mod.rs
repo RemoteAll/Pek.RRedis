@@ -744,6 +744,60 @@ fn dispatch(
             store.set_str(&destination, result.clone());
             (int(result.len() as i64), false)
         }
+        "SETBIT" => {
+            let offset = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
+            let value = if parse_i64(&args[3]).unwrap_or(0) != 0 { 1 } else { 0 };
+            let mut data = store.str_value(&args[1]).unwrap_or_default();
+            let old = bits_get(&data, offset, 1) as i64;
+            bits_set(&mut data, offset, 1, value);
+            store.set_str(&args[1], data);
+            (int(old), false)
+        }
+        "GETBIT" => {
+            let offset = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
+            (int(bits_get(&store.str_value(&args[1]).unwrap_or_default(), offset, 1) as i64), false)
+        }
+        "BITCOUNT" => {
+            let data = store.str_value(&args[1]).unwrap_or_default();
+            let slice = if args.len() >= 4 {
+                range_slice(
+                    &data,
+                    parse_i64(&args[2]).unwrap_or(0),
+                    parse_i64(&args[3]).unwrap_or(-1),
+                )
+            } else {
+                data
+            };
+            let count = slice.iter().map(|b| b.count_ones() as i64).sum::<i64>();
+            (int(count), false)
+        }
+        "BITPOS" => {
+            let data = store.str_value(&args[1]).unwrap_or_default();
+            let bit = parse_i64(&args[2]).unwrap_or(0);
+            let start = if args.len() >= 4 {
+                parse_i64(&args[3]).unwrap_or(0)
+            } else {
+                0
+            };
+            let end = if args.len() >= 5 {
+                parse_i64(&args[4]).unwrap_or(-1)
+            } else {
+                -1
+            };
+            let base = if start < 0 { 0 } else { start as usize } * 8;
+            let slice = range_slice(&data, start, end);
+            let mut found = -1i64;
+            'outer: for (byte_index, byte) in slice.iter().enumerate() {
+                for bit_index in 0..8 {
+                    let current = ((byte >> (7 - bit_index)) & 1) as i64;
+                    if current == bit {
+                        found = (base + byte_index * 8 + bit_index) as i64;
+                        break 'outer;
+                    }
+                }
+            }
+            (int(found), false)
+        }
         "STRLEN" => (int(store.str_value(&args[1]).map(|v| v.len()).unwrap_or(0) as i64), false),
         "GETRANGE" => {
             let data = store.str_value(&args[1]).unwrap_or_default();

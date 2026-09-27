@@ -40,9 +40,9 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | `Clusters`（Cluster/Sentinel/Replication） | 同名 | ✅ 已支持 Cluster / Sentinel / Replication：`CLUSTER NODES` 解析、slot/hash tag 路由、`MOVED`/`ASK`/`ASKING`、链式重定向、`mode=cluster|sentinel|replication` 与 `autoDetect` 自动加载拓扑、`TopologyRefreshSeconds` 刷新、单 key/多 key/搜索聚合、读副本与节点 shielding/backoff |
 | `RedisEventBus` / ASP.NET 集成（`RedisCacheProvider`/`RedisStat`/`RedisDeferred`/`CacheExtensions`） | `Services` | ➖ 不迁移（.NET 运行时专属，见审计说明） |
 | TLS | `Ssl`/`Tls`/`rediss://` | ✅ 已支持：`rediss://`、`Ssl=true`/`Tls=true`、`TlsServerName`、`TlsInsecure`；基于 rustls，同步客户端可直接走 TLS 连接 |
-| 异步 API | `*Async` | ✅ 已覆盖 `AsyncRedis`/`AsyncFullRedis`、Hash/List/Set/SortedSet/Stack/Geo/HyperLogLog、PubSub、Queue/ReliableQueue/DelayQueue/Stream；统一基于 tokio `spawn_blocking` 复用现有同步语义 |
+| 异步 API | `*Async` | ✅ 已覆盖 `AsyncRedis`/`AsyncFullRedis`、Hash/List/Set/SortedSet/Stack/Geo/HyperLogLog、PubSub、Queue/ReliableQueue/DelayQueue/Stream，且关键 direct/helper 命令已提供显式 async 入口；统一基于 tokio `spawn_blocking` 复用现有同步语义 |
 
-测试：**155 项**（76 单元 + 75 集成/端到端测试（7 async + 25 互通 + 22 审计 + 16 cluster 路由 + 5 live）+ 4 文档），
+测试：**158 项**（76 单元 + 78 集成/端到端测试（10 async + 25 互通 + 22 审计 + 16 cluster 路由 + 5 live）+ 4 文档），
 `cargo test` 离线全绿，`cargo clippy --all-targets` 零告警；另有 C#/Rust 两个可执行 Demo 做交叉验证（见第四节）。
 
 ### 与 C# 全量 API 审计（2026-09-26 复核）
@@ -56,7 +56,7 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
   `ServerType`/`Version` 探测、`FullRedis` 基础命令与便利公开面前缀层（含 `SetAll`/`SetGet`/`Copy`/`MemoryUsage`/`LPUSH`/`RPUSH`/`SADD`/`SREM`/`LPOS`/单键阻塞 `BLPOP`/`BRPOP`）、`RedisRedLock`、`consume_json`/`consume_raw`、Tair `Ex*`。
 - ➖ **明确不迁移（.NET 生态专属，与数据格式无关）**：`Bench`、`WriteLog`、`RedisCacheProvider`（ASP.NET `ICacheProvider`）、
   `RedisEventBus`、`RedisStat`、`RedisDeferred`、`CacheExtensions`、DI 扩展；`Tracer`/`Counter` 由 `QueueSettings::trace` 等效覆盖。
-- ✅ **异步对象模型已补齐**：`Redis` / `FullRedis` / Hash / List / Set / SortedSet / Stack / Geo / HyperLogLog / PubSub / 普通队列 / 可靠队列 / 延迟队列 / Stream 都已有命名 async wrapper；零散长尾能力仍可通过各 wrapper 自带的 `with_sync`，或 `AsyncRedis::with_sync` / `AsyncFullRedis::with_sync` 在 tokio 中复用同步能力。
+- ✅ **异步对象模型已补齐**：`Redis` / `FullRedis` / Hash / List / Set / SortedSet / Stack / Geo / HyperLogLog / PubSub / 普通队列 / 可靠队列 / 延迟队列 / Stream 都已有命名 async wrapper；关键 direct/helper 命令也已显式补齐，剩余极少数长尾能力仍可通过各 wrapper 自带的 `with_sync`，或 `AsyncRedis::with_sync` / `AsyncFullRedis::with_sync` 在 tokio 中复用同步能力。
 - ⚠️ **发现的 C# 侧问题（Rust 按官方行为实现）**：
   1. `RedisHash.HGetDel`/`HGetEx` 缺少 `FIELDS 1` 参数，对真实 Redis 会报语法错误；
   2. `RedisRedLock` 加锁使用普通 `SET`（非 `NX`），无互斥保证；Rust 为保持行为一致原样复刻，**混用两端 RedLock 不可依赖互斥**。
@@ -202,7 +202,7 @@ cargo test --test live_redis -- --nocapture
 | C# | `demo/csharp/PekRRedisDemo`（引用 DH.NRedis 源码工程） | `dotnet run --project demo\csharp\PekRRedisDemo -- auto --config "<连接串>"` |
 | Rust | `examples/demo.rs` | `cargo run --example demo -- auto --config "<连接串>"` |
 
-已实测的验证内容（2026-09-26）：
+已实测的验证内容（2026-09-27）：
 
 - `selftest`：两侧编码器字节格式全绿（字符串/整数/布尔/时间/JSON，含互相解码）；
 - 交叉读写：C# `write` → Rust `verify` 14/14；Rust `write` → C# `verify` 14/14，双方回执 `Failures` 均为空；
@@ -211,6 +211,8 @@ cargo test --test live_redis -- --nocapture
   C# 消费不确认 → Rust `retry_ack`（`XPENDING`+`XCLAIM`）抢回并确认，双方 `stream-status` 互认消费者与挂起；
 - 延迟队列：C# 写入（delay=2s）→ Rust 到期后消费；Rust 写入 → C# 到期后消费（`ZSET score` 两端一致）；
 - 分布式锁：C# 持锁期间 Rust 抢锁失败，释放后 Rust 立即接管（两种锁值格式兼容）。
+- PubSub：普通订阅（C# `SUBSCRIBE` ← Rust `PUBLISH`）、模式订阅（Rust `PSUBSCRIBE` ← C# `PUBLISH`）、分片订阅（C# `SSUBSCRIBE` ← Rust `SPUBLISH`）均已双向实跑，`delivered=1` 且订阅端收到预期频道与消息；
+- 双方回执：`report` 显示 C# / Rust 两侧 `Failures` 都为空。
 
 没有真实 Redis 也能跑（内置迷你 Redis，RESP2 子集）：
 
@@ -260,7 +262,7 @@ cargo run --example demo -- verify --config "server=127.0.0.1:16379;db=0"       
    字段内时间用 `encoder::datetime_text`（`yyyy-MM-dd HH:mm:ss.fff`，与 C# 字段编码逐字节一致）。
 8. **Tair `Ex*`**：仅阿里云 Tair（KVStore）实例可用；标准 Redis 执行会返回未知命令（与 C# 行为相同）。
 9. **`AutoPipeline`/`FullPipeline`**：C# 的自动管道优化未复刻，Rust 使用显式 `pipeline()`（语义等价）。
-10. **异步 wrapper 覆盖面**：当前已覆盖 `Redis` / `FullRedis` / Hash / List / Set / SortedSet / Stack / Geo / HyperLogLog / PubSub / 普通队列 / 可靠队列 / 延迟队列 / Stream；其余零散直接方法可通过 `with_sync` 复用同步实现。
+10. **异步 wrapper 覆盖面**：当前已覆盖 `Redis` / `FullRedis` / Hash / List / Set / SortedSet / Stack / Geo / HyperLogLog / PubSub / 普通队列 / 可靠队列 / 延迟队列 / Stream；关键 direct/helper 方法已提供显式 async 入口，其余极少数长尾能力仍可通过 `with_sync` 复用同步实现。
 11. **.NET 专属服务类不迁移**：`RedisStat`/`RedisDeferred`/`RedisEventBus`/`RedisCacheProvider`/`CacheExtensions`（依赖 TimerX/依赖注入）。
 
 ---

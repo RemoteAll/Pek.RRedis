@@ -12,6 +12,7 @@
 //! stream-push    ：向 Stream 写入 N 条消息（奇数为基元、偶数为对象）
 //! stream-consume ：用消费组消费 N 条并确认（--no-ack 留作死信）
 //! stream-status  ：查看流长度 / 消费组 / 挂起 / 消费者
+//! pubsub-publish / pubsub-subscribe ：跨语言 PubSub（普通/模式/分片）
 //! selftest：离线校验编码器字节格式（无需 Redis）
 //! report  ：查看双方回执
 //! clean   ：清理本 Demo 的键
@@ -35,6 +36,8 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
@@ -154,6 +157,31 @@ fn run() -> i32 {
             ctx.delay_consume(n, wait);
             0
         }
+        "pubsub-publish" => {
+            let channel = opt("--channel", "pubsub:demo");
+            let message = opt("--message", &format!("hello-from-{SIDE}"));
+            ctx.pubsub_publish(&channel, &message, has_flag("--shard"));
+            0
+        }
+        "pubsub-subscribe" => {
+            let channel = opt("--channel", "pubsub:demo");
+            let expect = opt("--expect", &format!("hello-from-{OTHER}"));
+            let expect_channel = if has_flag("--pattern") {
+                Some(opt("--expect-channel", "pubsub:demo"))
+            } else {
+                None
+            };
+            let timeout: u64 = opt("--timeout", "10").parse().unwrap_or(10);
+            ctx.pubsub_subscribe(
+                &channel,
+                &expect,
+                expect_channel.as_deref(),
+                timeout,
+                has_flag("--pattern"),
+                has_flag("--shard"),
+            );
+            0
+        }
         "report" => {
             ctx.report();
             0
@@ -169,7 +197,7 @@ fn run() -> i32 {
             code
         }
         other => {
-            println!("未知命令：{other}（可用：selftest/write/verify/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/report/clean/auto）");
+            println!("未知命令：{other}（可用：selftest/write/verify/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
             2
         }
     };
@@ -537,6 +565,98 @@ impl DemoCtx {
                 "  · {side:<6}：{}",
                 json.unwrap_or_else(|| "无（对方尚未运行 verify）".into())
             );
+        }
+    }
+
+    // ---------------- PubSub ----------------
+
+    fn pubsub_publish(&mut self, channel: &str, message: &str, shard: bool) {
+        println!(
+            "[pubsub-publish/{SIDE}] {} channel={channel} message={message}",
+            if shard { "SPUBLISH" } else { "PUBLISH" }
+        );
+
+        let pubsub = self.rds.get_pubsub(channel);
+        let delivered = if shard {
+            pubsub.spublish(message).unwrap_or(0)
+        } else {
+            pubsub.publish(message).unwrap_or(0)
+        };
+        println!("  ✔ delivered={delivered}");
+    }
+
+    fn pubsub_subscribe(
+        &mut self,
+        channel: &str,
+        expected_message: &str,
+        expected_channel: Option<&str>,
+        timeout_seconds: u64,
+        pattern: bool,
+        shard: bool,
+    ) {
+        println!(
+            "[pubsub-subscribe/{SIDE}] {} channel={channel} timeout={timeout_seconds}s expect={expected_message}",
+            if pattern {
+                "PSUBSCRIBE"
+            } else if shard {
+                "SSUBSCRIBE"
+            } else {
+                "SUBSCRIBE"
+            }
+        );
+
+        let pubsub = self.rds.get_pubsub(channel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel2 = cancel.clone();
+        let (tx, rx) = mpsc::sync_channel::<(Option<String>, String, String)>(1);
+
+        let handle = std::thread::spawn(move || {
+            if pattern {
+                pubsub.psubscribe(cancel2.clone(), move |pat, ch, msg| {
+                    println!("  · 收到 pattern={pat} channel={ch} message={msg}");
+                    let _ = tx.send((Some(pat.to_string()), ch.to_string(), msg.to_string()));
+                    cancel2.store(true, Ordering::SeqCst);
+                })
+            } else if shard {
+                pubsub.ssubscribe(cancel2.clone(), move |ch, msg| {
+                    println!("  · 收到 channel={ch} message={msg}");
+                    let _ = tx.send((None, ch.to_string(), msg.to_string()));
+                    cancel2.store(true, Ordering::SeqCst);
+                })
+            } else {
+                pubsub.subscribe(cancel2.clone(), move |ch, msg| {
+                    println!("  · 收到 channel={ch} message={msg}");
+                    let _ = tx.send((None, ch.to_string(), msg.to_string()));
+                    cancel2.store(true, Ordering::SeqCst);
+                })
+            }
+        });
+
+        let received = rx.recv_timeout(Duration::from_secs(timeout_seconds));
+        cancel.store(true, Ordering::SeqCst);
+        let join_result = handle.join().unwrap();
+        if let Err(err) = join_result {
+            self.check(false, "PubSub 订阅执行成功", Some(err.to_string()));
+            return;
+        }
+
+        match received {
+            Ok((_pattern, actual_channel, actual_message)) => {
+                let ok = actual_message == expected_message
+                    && expected_channel
+                        .map(|value| value == actual_channel)
+                        .unwrap_or(true);
+                self.check(
+                    ok,
+                    "PubSub 收到预期消息",
+                    Some(format!("channel={actual_channel} message={actual_message}")),
+                );
+            }
+            Err(_) => self.check(
+                false,
+                "PubSub 收到预期消息",
+                Some(format!("timeout={timeout_seconds}s channel={channel}")),
+            ),
         }
     }
 

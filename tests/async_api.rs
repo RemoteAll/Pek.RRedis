@@ -261,9 +261,20 @@ fn async_full_redis_explicit_surface_roundtrip() {
             redis.get_string("api:key2".into()).await.unwrap().as_deref(),
             Some("v:1")
         );
+        let paged = redis.search_paged("api:*".into(), 0, 10).await.unwrap();
+        assert_eq!(paged.0, 0);
+        assert_eq!(paged.1, vec!["api:key2".to_string()]);
 
         assert_eq!(redis.increment("counter".into(), 2).await.unwrap(), 2);
         assert_eq!(redis.decrement("counter".into(), 1).await.unwrap(), 1);
+
+        let optional_lock = redis
+            .acquire_lock_ex("lock:optional".into(), 200, 400, false)
+            .await
+            .unwrap();
+        assert!(optional_lock.is_some());
+        drop(optional_lock);
+        redis.swapdb(0, 1).await.unwrap();
 
         let script: Option<String> = redis
             .eval("return ARGV[1]".into(), Vec::new(), vec!["lua".into()])
@@ -296,6 +307,16 @@ fn async_full_redis_explicit_surface_roundtrip() {
             .unwrap();
         assert_eq!(lib, "testlib");
         assert_eq!(redis.function_list(Some("testlib".into())).await.unwrap().len(), 1);
+        let echoed: Option<String> = redis
+            .fcall("echo".into(), Vec::new(), vec!["fcall".into()])
+            .await
+            .unwrap();
+        assert_eq!(echoed.as_deref(), Some("fcall"));
+        let echoed_ro: Option<String> = redis
+            .fcall_ro("echo".into(), Vec::new(), vec!["fcall-ro".into()])
+            .await
+            .unwrap();
+        assert_eq!(echoed_ro.as_deref(), Some("fcall-ro"));
         redis.function_delete("testlib".into()).await.unwrap();
         assert!(redis.function_list(Some("testlib".into())).await.unwrap().is_empty());
 
@@ -367,5 +388,83 @@ fn async_stream_management_surface_roundtrip() {
         assert_eq!(stream.group_destroy("g1".into()).await.unwrap(), 1);
         assert_eq!(stream.delete(id.clone()).await.unwrap(), 1);
         assert_eq!(stream.count().await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn async_full_redis_helper_surface_roundtrip() {
+    let (_server, sync) = support::mock_full();
+    let redis = AsyncFullRedis::from_sync(sync);
+
+    runtime().block_on(async {
+        assert_eq!(
+            redis
+                .rpush(
+                    "list:a".into(),
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                )
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(redis.lpos("list:a".into(), "b".into(), 0, 1, 0).await.unwrap(), vec![1]);
+
+        let moved: Option<String> = redis
+            .lmove("list:a".into(), "list:b".into(), false, true)
+            .await
+            .unwrap();
+        assert_eq!(moved.as_deref(), Some("c"));
+
+        let popped = redis
+            .blpop_multi::<String>(vec!["list:b".into()], 0)
+            .await
+            .unwrap();
+        assert_eq!(popped.as_ref().map(|(_, value)| value.as_str()), Some("c"));
+
+        assert_eq!(
+            redis
+                .sadd("set:1".into(), vec!["a".to_string(), "b".to_string()])
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            redis
+                .sadd("set:2".into(), vec!["b".to_string(), "c".to_string()])
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            redis
+                .smismember("set:1".into(), vec!["a".into(), "x".into()])
+                .await
+                .unwrap(),
+            vec![true, false]
+        );
+        assert_eq!(
+            redis
+                .sinter_card(vec!["set:1".into(), "set:2".into()], 0)
+                .await
+                .unwrap(),
+            1
+        );
+
+        assert_eq!(redis.set_bit("bits".into(), 1, 1).await.unwrap(), 0);
+        assert_eq!(redis.get_bit("bits".into(), 1).await.unwrap(), 1);
+        assert_eq!(redis.bit_count("bits".into(), 0, -1).await.unwrap(), 1);
+        assert_eq!(redis.bit_pos("bits".into(), 1, 0, -1).await.unwrap(), 1);
+
+        let zset = redis.get_sorted_set::<String>("z:helper");
+        zset.add("m1".to_string(), 1.0).await.unwrap();
+        zset.add("m2".to_string(), 2.0).await.unwrap();
+        assert_eq!(
+            redis
+                .zmscore("z:helper".into(), vec!["m1".into(), "m2".into(), "m3".into()])
+                .await
+                .unwrap(),
+            vec![Some(1.0), Some(2.0), None]
+        );
+        assert_eq!(redis.zrand_member_with_scores::<String>("z:helper".into(), 2).await.unwrap().len(), 2);
     });
 }

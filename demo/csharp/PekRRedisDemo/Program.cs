@@ -8,10 +8,11 @@
 //   5) qstatus ：查看可靠队列、Ack 队列与消费者状态（Status JSON 可被对方解读）
 //   6) lock    ：申请分布式锁、持有若干秒后释放（可与对方进程抢锁）
 //   7) stream-push / stream-consume / stream-status：Stream 消息队列（消费组 + 死信抢占）
-//   8) selftest：离线校验编码器字节格式（无需 Redis）
-//   9) report  ：查看双方回执
-//  10) clean   ：清理本 Demo 的键
-//  11) auto    ：write + verify + report
+//   8) pubsub-publish / pubsub-subscribe：跨语言 PubSub（普通/模式/分片）
+//   9) selftest：离线校验编码器字节格式（无需 Redis）
+//  10) report  ：查看双方回执
+//  11) clean   ：清理本 Demo 的键
+//  12) auto    ：write + verify + report
 //
 // 用法：
 //   dotnet run --project demo\csharp\PekRRedisDemo -- selftest
@@ -121,6 +122,27 @@ switch (command)
             DelayConsume(rds, int.TryParse(GetOpt("--count", "3"), out var dc) ? dc : 3, int.TryParse(GetOpt("--wait", "15"), out var dw) ? dw : 15);
         break;
 
+    case "pubsub-publish":
+        using (var rds = Connect())
+            PubSubPublish(
+                rds,
+                GetOpt("--channel", "pubsub:demo"),
+                GetOpt("--message", $"hello-from-{Side}"),
+                argsList.Contains("--shard"));
+        break;
+
+    case "pubsub-subscribe":
+        using (var rds = Connect())
+            await PubSubSubscribe(
+                rds,
+                GetOpt("--channel", "pubsub:demo"),
+                GetOpt("--expect", $"hello-from-{OtherSide}"),
+                argsList.Contains("--pattern") ? GetOpt("--expect-channel", "pubsub:demo") : null,
+                int.TryParse(GetOpt("--timeout", "10"), out var pt) ? pt : 10,
+                argsList.Contains("--pattern"),
+                argsList.Contains("--shard"));
+        break;
+
     case "report":
         using (var rds = Connect()) Report(rds);
         break;
@@ -139,7 +161,7 @@ switch (command)
         break;
 
     default:
-        Console.WriteLine($"未知命令：{command}（可用：selftest/write/verify/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/report/clean/auto）");
+        Console.WriteLine($"未知命令：{command}（可用：selftest/write/verify/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
         return 2;
 }
 
@@ -371,6 +393,77 @@ void Report(FullRedis rds)
         var json = rds.Get<String>($"{side}:receipt");
         Console.WriteLine($"  · {side,-6}：{json ?? "无（对方尚未运行 verify）"}");
     }
+}
+
+// ======================= PubSub =======================
+
+void PubSubPublish(FullRedis rds, string channel, string message, bool shard)
+{
+    Console.WriteLine($"[pubsub-publish/{Side}] {(shard ? "SPUBLISH" : "PUBLISH")} channel={channel} message={message}");
+    var pubsub = new PubSub(rds, channel);
+    var delivered = shard ? pubsub.SPublish(message) : pubsub.Publish(message);
+    Console.WriteLine($"  ✔ delivered={delivered}");
+}
+
+async Task PubSubSubscribe(
+    FullRedis rds,
+    string channel,
+    string expectedMessage,
+    string? expectedChannel,
+    int timeoutSeconds,
+    bool pattern,
+    bool shard)
+{
+    Console.WriteLine($"[pubsub-subscribe/{Side}] {(pattern ? "PSUBSCRIBE" : shard ? "SSUBSCRIBE" : "SUBSCRIBE")} channel={channel} timeout={timeoutSeconds}s expect={expectedMessage}");
+
+    var pubsub = new PubSub(rds, channel);
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+    var received = new TaskCompletionSource<(string? Pattern, string Channel, string Message)>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    try
+    {
+        if (pattern)
+        {
+            await pubsub.PSubscribeAsync((pat, ch, msg) =>
+            {
+                Console.WriteLine($"  · 收到 pattern={pat} channel={ch} message={msg}");
+                received.TrySetResult((pat, ch, msg));
+                cts.Cancel();
+            }, cts.Token);
+        }
+        else if (shard)
+        {
+            await pubsub.SSubscribeAsync((ch, msg) =>
+            {
+                Console.WriteLine($"  · 收到 channel={ch} message={msg}");
+                received.TrySetResult((null, ch, msg));
+                cts.Cancel();
+            }, cts.Token);
+        }
+        else
+        {
+            await pubsub.SubscribeAsync((ch, msg) =>
+            {
+                Console.WriteLine($"  · 收到 channel={ch} message={msg}");
+                received.TrySetResult((null, ch, msg));
+                cts.Cancel();
+            }, cts.Token);
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        // 收到消息后主动取消，或等待超时；结果在下方统一判断。
+    }
+
+    if (!received.Task.IsCompleted)
+    {
+        Check(false, "PubSub 收到预期消息", $"timeout={timeoutSeconds}s channel={channel}");
+        return;
+    }
+
+    var result = await received.Task;
+    var ok = result.Message == expectedMessage && (expectedChannel == null || result.Channel == expectedChannel);
+    Check(ok, "PubSub 收到预期消息", $"channel={result.Channel} message={result.Message}");
 }
 
 // ======================= Stream 消息队列 =======================

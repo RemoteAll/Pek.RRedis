@@ -29,6 +29,7 @@ use crate::queues::{
 };
 use crate::redis::{Redis, ServerType};
 use crate::set::RedisSet;
+use crate::services::RedLock;
 use crate::sortedset::RedisSortedSet;
 use crate::stack::RedisStack;
 use crate::{FromRedisPayload, ToRedisPayload};
@@ -92,6 +93,16 @@ impl AsyncRedis {
     /// 回到底层同步句柄（共享同一连接池）。
     pub fn sync(&self) -> &Redis {
         &self.inner
+    }
+
+    /// 设置拓扑选择器。
+    pub fn set_topology(&self, topology: Arc<dyn crate::cluster::Topology>) {
+        self.inner.set_topology(topology);
+    }
+
+    /// 清空拓扑选择器。
+    pub fn clear_topology(&self) {
+        self.inner.clear_topology();
     }
 
     /// 对底层同步句柄执行任意闭包，并放入 tokio blocking 池。
@@ -194,6 +205,11 @@ impl AsyncRedis {
         self.with_sync(move |redis| redis.keys_raw(&pattern)).await
     }
 
+    /// 读取全部键。
+    pub async fn keys(&self) -> Result<Vec<String>> {
+        self.with_sync(|redis| redis.keys()).await
+    }
+
     /// 健康检查。
     pub async fn ping(&self) -> Result<bool> {
         self.with_sync(|redis| redis.ping()).await
@@ -214,10 +230,76 @@ impl AsyncRedis {
         self.with_sync(move |redis| redis.get_expire(&key)).await
     }
 
+    /// 获取毫秒级过期时间。
+    pub async fn get_expire_ms(&self, key: String) -> Result<i64> {
+        self.with_sync(move |redis| redis.get_expire_ms(&key)).await
+    }
+
+    /// 设置毫秒级过期时间。
+    pub async fn set_expire_ms(&self, key: String, milliseconds: i64) -> Result<bool> {
+        self.with_sync(move |redis| redis.set_expire_ms(&key, milliseconds))
+            .await
+    }
+
+    /// 移除过期时间。
+    pub async fn persist(&self, key: String) -> Result<bool> {
+        self.with_sync(move |redis| redis.persist(&key)).await
+    }
+
     /// 重命名键。
     pub async fn rename(&self, key: String, new_key: String, overwrite: bool) -> Result<bool> {
         self.with_sync(move |redis| redis.rename(&key, &new_key, overwrite))
             .await
+    }
+
+    /// 异步删除。
+    pub async fn unlink(&self, keys: Vec<String>) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.unlink(&refs)
+        })
+        .await
+    }
+
+    /// 刷新访问时间。
+    pub async fn touch(&self, keys: Vec<String>) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.touch(&refs)
+        })
+        .await
+    }
+
+    /// 复制键。
+    pub async fn copy(
+        &self,
+        source: String,
+        destination: String,
+        db: Option<i32>,
+        replace: bool,
+    ) -> Result<bool> {
+        self.with_sync(move |redis| redis.copy(&source, &destination, db, replace))
+            .await
+    }
+
+    /// 随机键。
+    pub async fn random_key(&self) -> Result<Option<String>> {
+        self.with_sync(|redis| redis.random_key()).await
+    }
+
+    /// 键内存占用。
+    pub async fn memory_usage(&self, key: String, samples: i32) -> Result<Option<i64>> {
+        self.with_sync(move |redis| redis.memory_usage(&key, samples)).await
+    }
+
+    /// 对象内部编码。
+    pub async fn object_encoding(&self, key: String) -> Result<Option<String>> {
+        self.with_sync(move |redis| redis.object_encoding(&key)).await
+    }
+
+    /// 分页扫描。
+    pub async fn scan(&self, cursor: u64, pattern: String, count: usize) -> Result<(u64, Vec<String>)> {
+        self.with_sync(move |redis| redis.scan(cursor, &pattern, count)).await
     }
 
     /// 获取原始二进制值。
@@ -277,6 +359,35 @@ impl AsyncRedis {
             .await
     }
 
+    /// 设置位。
+    pub async fn set_bit(&self, key: String, offset: u64, value: u8) -> Result<i64> {
+        self.with_sync(move |redis| redis.set_bit(&key, offset, value)).await
+    }
+
+    /// 读取位。
+    pub async fn get_bit(&self, key: String, offset: u64) -> Result<i64> {
+        self.with_sync(move |redis| redis.get_bit(&key, offset)).await
+    }
+
+    /// 位计数。
+    pub async fn bit_count(&self, key: String, start: i64, end: i64) -> Result<i64> {
+        self.with_sync(move |redis| redis.bit_count(&key, start, end)).await
+    }
+
+    /// 位位置。
+    pub async fn bit_pos(&self, key: String, bit: i32, start: i64, end: i64) -> Result<i64> {
+        self.with_sync(move |redis| redis.bit_pos(&key, bit, start, end)).await
+    }
+
+    /// 多键位运算。
+    pub async fn bit_op(&self, operation: String, dest_key: String, keys: Vec<String>) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.bit_op(&operation, &dest_key, &refs)
+        })
+        .await
+    }
+
     /// 整数自增。
     pub async fn increment(&self, key: String, delta: i64) -> Result<i64> {
         self.with_sync(move |redis| redis.increment(&key, delta)).await
@@ -311,6 +422,36 @@ impl AsyncRedis {
     /// 服务器类型。
     pub async fn server_type(&self) -> Result<ServerType> {
         self.with_sync(|redis| redis.server_type()).await
+    }
+
+    /// 服务器时间。
+    pub async fn time(&self) -> Result<(i64, i64)> {
+        self.with_sync(|redis| redis.time()).await
+    }
+
+    /// 清空当前库。
+    pub async fn clear(&self) -> Result<()> {
+        self.with_sync(|redis| redis.clear()).await
+    }
+
+    /// 创建子库。
+    pub fn create_sub(&self, db: i32) -> Result<Self> {
+        Ok(Self::from_sync(self.inner.create_sub(db)?))
+    }
+
+    /// 加载脚本缓存。
+    pub async fn script_load(&self, script: String) -> Result<String> {
+        self.with_sync(move |redis| redis.script_load(&script)).await
+    }
+
+    /// 判断脚本缓存是否存在。
+    pub async fn script_exists(&self, sha1: String) -> Result<bool> {
+        self.with_sync(move |redis| redis.script_exists(&sha1)).await
+    }
+
+    /// 清空脚本缓存。
+    pub async fn script_flush(&self) -> Result<()> {
+        self.with_sync(|redis| redis.script_flush()).await
     }
 
     /// 执行 Lua 脚本并返回原始应答。
@@ -379,6 +520,16 @@ impl AsyncFullRedis {
         AsyncRedis::from_sync(self.inner.redis().clone())
     }
 
+    /// 设置拓扑选择器。
+    pub fn set_topology(&self, topology: Arc<dyn crate::cluster::Topology>) {
+        self.inner.set_topology(topology);
+    }
+
+    /// 清空拓扑选择器。
+    pub fn clear_topology(&self) {
+        self.inner.clear_topology();
+    }
+
     /// 执行任意同步闭包。
     pub async fn with_sync<T, F>(&self, f: F) -> Result<T>
     where
@@ -394,6 +545,17 @@ impl AsyncFullRedis {
         self.with_sync(move |redis| redis.search(&pattern, count)).await
     }
 
+    /// 分页搜索。
+    pub async fn search_paged(
+        &self,
+        pattern: String,
+        cursor: u64,
+        count: usize,
+    ) -> Result<(u64, Vec<String>)> {
+        self.with_sync(move |redis| redis.search_paged(&pattern, cursor, count))
+            .await
+    }
+
     /// 按模式删除。
     pub async fn remove_pattern(&self, pattern: String) -> Result<i64> {
         self.with_sync(move |redis| redis.remove_pattern(&pattern)).await
@@ -403,6 +565,20 @@ impl AsyncFullRedis {
     pub async fn acquire_lock(&self, key: String, ms_timeout: i32) -> Result<LockHandle> {
         self.with_sync(move |redis| redis.acquire_lock(&key, ms_timeout))
             .await
+    }
+
+    /// 分布式锁（完整参数）。
+    pub async fn acquire_lock_ex(
+        &self,
+        key: String,
+        ms_timeout: i32,
+        ms_expire: i32,
+        throw_on_failure: bool,
+    ) -> Result<Option<LockHandle>> {
+        self.with_sync(move |redis| {
+            redis.acquire_lock_ex(&key, ms_timeout, ms_expire, throw_on_failure)
+        })
+        .await
     }
 
     /// 创建子库。
@@ -668,6 +844,11 @@ impl AsyncFullRedis {
         self.with_sync(move |redis| redis.wait(num_replicas, timeout_ms)).await
     }
 
+    /// 交换两个库。
+    pub async fn swapdb(&self, db1: i32, db2: i32) -> Result<()> {
+        self.with_sync(move |redis| redis.swapdb(db1, db2)).await
+    }
+
     /// 慢日志条数。
     pub async fn slowlog_len(&self) -> Result<i64> {
         self.with_sync(|redis| redis.slowlog_len()).await
@@ -728,6 +909,446 @@ impl AsyncFullRedis {
     /// 导出 Prometheus 指标。
     pub async fn get_prometheus_metrics(&self) -> Result<String> {
         self.with_sync(|redis| redis.get_prometheus_metrics()).await
+    }
+
+    /// 设置位。
+    pub async fn set_bit(&self, key: String, offset: u64, value: u8) -> Result<i64> {
+        self.with_sync(move |redis| redis.set_bit(&key, offset, value)).await
+    }
+
+    /// 读取位。
+    pub async fn get_bit(&self, key: String, offset: u64) -> Result<i64> {
+        self.with_sync(move |redis| redis.get_bit(&key, offset)).await
+    }
+
+    /// 位计数。
+    pub async fn bit_count(&self, key: String, start: i64, end: i64) -> Result<i64> {
+        self.with_sync(move |redis| redis.bit_count(&key, start, end)).await
+    }
+
+    /// 位位置。
+    pub async fn bit_pos(&self, key: String, bit: i32, start: i64, end: i64) -> Result<i64> {
+        self.with_sync(move |redis| redis.bit_pos(&key, bit, start, end)).await
+    }
+
+    /// 多键位运算。
+    pub async fn bit_op(&self, operation: String, dest_key: String, keys: Vec<String>) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.bit_op(&operation, &dest_key, &refs)
+        })
+        .await
+    }
+
+    /// 位域批量操作。
+    pub async fn bit_field(&self, key: String, args: Vec<String>) -> Result<Vec<i64>> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = args.iter().map(|arg| arg.as_str()).collect();
+            redis.bit_field(&key, &refs)
+        })
+        .await
+    }
+
+    /// 异步删除。
+    pub async fn unlink(&self, keys: Vec<String>) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.unlink(&refs)
+        })
+        .await
+    }
+
+    /// 刷新访问时间。
+    pub async fn touch(&self, keys: Vec<String>) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.touch(&refs)
+        })
+        .await
+    }
+
+    /// 复制键。
+    pub async fn copy(
+        &self,
+        source: String,
+        destination: String,
+        destination_db: Option<i32>,
+        replace: bool,
+    ) -> Result<bool> {
+        self.with_sync(move |redis| redis.copy(&source, &destination, destination_db, replace))
+            .await
+    }
+
+    /// 键内存占用。
+    pub async fn memory_usage(&self, key: String, samples: i32) -> Result<Option<i64>> {
+        self.with_sync(move |redis| redis.memory_usage(&key, samples)).await
+    }
+
+    /// 对象内部编码。
+    pub async fn object_encoding(&self, key: String) -> Result<Option<String>> {
+        self.with_sync(move |redis| redis.object_encoding(&key)).await
+    }
+
+    /// 随机键。
+    pub async fn random_key(&self) -> Result<Option<String>> {
+        self.with_sync(|redis| redis.random_key()).await
+    }
+
+    /// 列表尾部插入。
+    pub async fn rpush<V>(&self, key: String, values: Vec<V>) -> Result<i64>
+    where
+        V: ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.rpush(&key, &values)).await
+    }
+
+    /// 列表头部插入。
+    pub async fn lpush<V>(&self, key: String, values: Vec<V>) -> Result<i64>
+    where
+        V: ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.lpush(&key, &values)).await
+    }
+
+    /// 列表右弹。
+    pub async fn rpop<V>(&self, key: String) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.rpop(&key)).await
+    }
+
+    /// 列表右阻塞弹。
+    pub async fn brpop<V>(&self, key: String, timeout_seconds: i64) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.brpop(&key, timeout_seconds)).await
+    }
+
+    /// 列表左弹。
+    pub async fn lpop<V>(&self, key: String) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.lpop(&key)).await
+    }
+
+    /// 列表左阻塞弹。
+    pub async fn blpop<V>(&self, key: String, timeout_seconds: i64) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.blpop(&key, timeout_seconds)).await
+    }
+
+    /// 右弹左推。
+    pub async fn rpoplpush<V>(&self, source: String, destination: String) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.rpoplpush(&source, &destination))
+            .await
+    }
+
+    /// 阻塞右弹左推。
+    pub async fn brpoplpush<V>(
+        &self,
+        source: String,
+        destination: String,
+        timeout_seconds: i64,
+    ) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.brpoplpush(&source, &destination, timeout_seconds))
+            .await
+    }
+
+    /// 集合全部成员。
+    pub async fn smembers<V>(&self, key: String) -> Result<Vec<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.smembers(&key)).await
+    }
+
+    /// 集合基数。
+    pub async fn scard(&self, key: String) -> Result<i64> {
+        self.with_sync(move |redis| redis.scard(&key)).await
+    }
+
+    /// 集合成员判断。
+    pub async fn sismember<V>(&self, key: String, member: V) -> Result<bool>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.sismember(&key, &member)).await
+    }
+
+    /// 集合移动。
+    pub async fn smove<V>(&self, source: String, destination: String, member: V) -> Result<bool>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.smove(&source, &destination, &member))
+            .await
+    }
+
+    /// 集合随机成员。
+    pub async fn srandmember<V>(&self, key: String, count: i64) -> Result<Vec<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.srandmember(&key, count)).await
+    }
+
+    /// 集合随机弹出。
+    pub async fn spop<V>(&self, key: String, count: i64) -> Result<Vec<V>>
+    where
+        V: FromRedisPayload + ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.spop(&key, count)).await
+    }
+
+    /// 集合添加。
+    pub async fn sadd<V>(&self, key: String, members: Vec<V>) -> Result<i64>
+    where
+        V: ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.sadd(&key, &members)).await
+    }
+
+    /// 集合删除。
+    pub async fn srem<V>(&self, key: String, members: Vec<V>) -> Result<i64>
+    where
+        V: ToRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.srem(&key, &members)).await
+    }
+
+    /// 跨键移动元素。
+    pub async fn lmove<V>(
+        &self,
+        source: String,
+        destination: String,
+        from_left: bool,
+        to_left: bool,
+    ) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.lmove(&source, &destination, from_left, to_left))
+            .await
+    }
+
+    /// 阻塞跨键移动元素。
+    pub async fn blmove<V>(
+        &self,
+        source: String,
+        destination: String,
+        from_left: bool,
+        to_left: bool,
+        timeout_seconds: i64,
+    ) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            redis.blmove(&source, &destination, from_left, to_left, timeout_seconds)
+        })
+        .await
+    }
+
+    /// 多键弹出。
+    pub async fn lmpop<V>(
+        &self,
+        keys: Vec<String>,
+        from_left: bool,
+        count: usize,
+    ) -> Result<Option<(String, Vec<V>)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.lmpop(&refs, from_left, count)
+        })
+        .await
+    }
+
+    /// 多键阻塞右弹。
+    pub async fn brpop_multi<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.brpop_multi(&refs, timeout_seconds)
+        })
+        .await
+    }
+
+    /// 多键阻塞左弹。
+    pub async fn blpop_multi<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.blpop_multi(&refs, timeout_seconds)
+        })
+        .await
+    }
+
+    /// 查找列表元素位置。
+    pub async fn lpos(
+        &self,
+        key: String,
+        element: String,
+        rank: i32,
+        count: i32,
+        max_len: i32,
+    ) -> Result<Vec<i64>> {
+        self.with_sync(move |redis| redis.lpos(&key, &element, rank, count, max_len))
+            .await
+    }
+
+    /// 批量成员存在性。
+    pub async fn smismember(&self, key: String, members: Vec<String>) -> Result<Vec<bool>> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = members.iter().map(|member| member.as_str()).collect();
+            redis.smismember(&key, &refs)
+        })
+        .await
+    }
+
+    /// 多键交集基数。
+    pub async fn sinter_card(&self, keys: Vec<String>, limit: usize) -> Result<i64> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.sinter_card(&refs, limit)
+        })
+        .await
+    }
+
+    /// 批量成员分数。
+    pub async fn zmscore(&self, key: String, members: Vec<String>) -> Result<Vec<Option<f64>>> {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = members.iter().map(|member| member.as_str()).collect();
+            redis.zmscore(&key, &refs)
+        })
+        .await
+    }
+
+    /// 随机有序集合成员。
+    pub async fn zrand_member<V>(&self, key: String, count: i64) -> Result<Vec<V>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.zrand_member(&key, count)).await
+    }
+
+    /// 随机有序集合成员及分数。
+    pub async fn zrand_member_with_scores<V>(&self, key: String, count: i64) -> Result<Vec<(V, f64)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| redis.zrand_member_with_scores(&key, count)).await
+    }
+
+    /// 多键弹出有序集合元素。
+    #[allow(clippy::type_complexity)]
+    pub async fn zmpop<V>(
+        &self,
+        keys: Vec<String>,
+        min: bool,
+        count: usize,
+    ) -> Result<Option<(String, Vec<(V, f64)>)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.zmpop(&refs, min, count)
+        })
+        .await
+    }
+
+    /// 多键阻塞弹出最小分成员。
+    pub async fn bzpopmin<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V, f64)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.bzpopmin(&refs, timeout_seconds)
+        })
+        .await
+    }
+
+    /// 多键阻塞弹出最大分成员。
+    pub async fn bzpopmax<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V, f64)>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            redis.bzpopmax(&refs, timeout_seconds)
+        })
+        .await
+    }
+
+    /// 设置复制跟随。
+    pub async fn replica_of(&self, host: Option<String>, port: u16) -> Result<()> {
+        self.with_sync(move |redis| redis.replica_of(host.as_deref(), port)).await
+    }
+
+    /// 调用已加载函数。
+    pub async fn fcall<V>(&self, function: String, keys: Vec<String>, args: Vec<String>) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let key_refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            let arg_refs: Vec<&str> = args.iter().map(|arg| arg.as_str()).collect();
+            redis.fcall(&function, &key_refs, &arg_refs)
+        })
+        .await
+    }
+
+    /// 只读调用已加载函数。
+    pub async fn fcall_ro<V>(
+        &self,
+        function: String,
+        keys: Vec<String>,
+        args: Vec<String>,
+    ) -> Result<Option<V>>
+    where
+        V: FromRedisPayload + Send + 'static,
+    {
+        self.with_sync(move |redis| {
+            let key_refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+            let arg_refs: Vec<&str> = args.iter().map(|arg| arg.as_str()).collect();
+            redis.fcall_ro(&function, &key_refs, &arg_refs)
+        })
+        .await
+    }
+
+    /// 获取 RedLock。
+    pub async fn acquire_red_lock(
+        &self,
+        other_instances: Vec<AsyncFullRedis>,
+        key: String,
+        ms_timeout: i64,
+        ms_expire: i64,
+    ) -> Result<Option<RedLock>> {
+        let redis = self.inner.clone();
+        spawn_result(move || {
+            let others: Vec<FullRedis> = other_instances.into_iter().map(|item| item.inner).collect();
+            redis.acquire_red_lock(&others, &key, ms_timeout, ms_expire)
+        })
+        .await
     }
 
     /// 普通队列。

@@ -235,11 +235,11 @@ C# 通过 `IRedisCluster` 统一三种模式：
 
 - 目标：不再维护第二套 RESP / 连接池 / TLS / cluster 路由实现，而是用 tokio `spawn_blocking` 把现有同步能力安全暴露为 async。
 
-当前状态：已完成初版闭环。
+当前状态：已完成闭环，并对显式 async 公开面做了第二轮补齐。
 
 - 已完成：新增 `src/async_api.rs`，公开 `AsyncRedis`、`AsyncFullRedis`、`AsyncRedisHash`、`AsyncRedisList`、`AsyncRedisSet`、`AsyncRedisSortedSet`、`AsyncRedisStack`、`AsyncRedisGeo`、`AsyncHyperLogLog`、`AsyncPubSub`、`AsyncRedisQueue`、`AsyncRedisReliableQueue`、`AsyncRedisDelayQueue`、`AsyncRedisStream`。
 - 已完成：`AsyncRedis::with_sync` / `AsyncFullRedis::with_sync` 作为通用逃生口；结构型 wrapper 也提供 `with_sync`，便于在不补第二套协议栈的前提下承接长尾同步能力。
-- 已完成验证：新增/扩展 `tests/async_api.rs`，覆盖基础 KV、Hash、List、Set、SortedSet、HyperLogLog、Stack、PubSub（普通/模式/分片）、普通队列、可靠队列、Stream，确认 tokio 包装不改变现有行为语义。
+- 已完成验证：新增/扩展 `tests/async_api.rs`，现共 10 条用例，覆盖基础 KV、Hash、List、Set、SortedSet、HyperLogLog、Stack、PubSub（普通/模式/分片）、普通队列、可靠队列、Stream，以及显式 async helper/管理命令，确认 tokio 包装不改变现有行为语义。
 - 当前剩余：无功能性缺口；后续主要是可选的人体工学增强、错误分类细化，或是否需要原生 async socket/RESP 栈。
 
 ## 六、一期测试清单
