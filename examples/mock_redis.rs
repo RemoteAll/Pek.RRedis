@@ -19,6 +19,12 @@ mod support;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let get_opt = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
     let port: u16 = args
         .iter()
         .position(|a| a == "--port")
@@ -27,6 +33,27 @@ fn main() {
         .unwrap_or(16_379);
 
     let server = support::start_mock_redis_on(port);
+
+    if let Some(mode) = get_opt("--info-mode") {
+        support::set_info_mode(&server, &mode);
+    }
+    if let Some(path) = get_opt("--info-text-file") {
+        let text = std::fs::read_to_string(path).expect("read --info-text-file");
+        support::set_info_text(&server, &text);
+    }
+    if let Some(path) = get_opt("--info-replication-file") {
+        let text = std::fs::read_to_string(path).expect("read --info-replication-file");
+        support::set_info_replication(&server, &text);
+    }
+    if let Some(path) = get_opt("--info-sentinel-file") {
+        let text = std::fs::read_to_string(path).expect("read --info-sentinel-file");
+        support::set_info_sentinel(&server, &text);
+    }
+    if let Some(path) = get_opt("--cluster-nodes-file") {
+        let text = std::fs::read_to_string(path).expect("read --cluster-nodes-file");
+        support::set_cluster_nodes(&server, &text);
+    }
+
     println!("[mock_redis] 已启动：{}（RESP2 子集实现，按 Enter 退出）", server.addr);
     println!("MOCK_ADDR={}", server.addr);
 

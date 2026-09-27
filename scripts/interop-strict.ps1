@@ -114,6 +114,10 @@ function Get-CSharpDemoExe {
     Join-Path $PWD "demo\csharp\PekRRedisDemo\bin\Debug\net10.0\PekRRedisDemo.exe"
 }
 
+function Get-MockRedisExe {
+    Join-Path $PWD "target\debug\examples\mock_redis.exe"
+}
+
 function Invoke-RustDemo {
     param([string[]]$CommandArgs)
     $exe = Get-RustDemoExe
@@ -130,6 +134,191 @@ function Invoke-CSharpDemo {
         throw "C# demo executable not found: $exe"
     }
     Invoke-ExeCapture -Exe $exe -CommandArgs $CommandArgs -Name ("csharp-" + (($CommandArgs -join '-') -replace '[^a-zA-Z0-9_-]', '_'))
+}
+
+function New-Utf8TempFile {
+    param(
+        [string]$Name,
+        [string]$Content
+    )
+
+    $dir = Join-Path $PWD "target"
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+
+    $path = Join-Path $dir $Name
+    [System.IO.File]::WriteAllText($path, $Content, [System.Text.Encoding]::UTF8)
+    $path
+}
+
+function Start-MockRedis {
+    param(
+        [string]$Name,
+        [int]$Port,
+        [string]$InfoMode,
+        [string]$InfoText,
+        [string]$InfoReplication,
+        [string]$InfoSentinel,
+        [string]$ClusterNodes
+    )
+
+    $exe = Get-MockRedisExe
+    if (-not (Test-Path $exe)) {
+        throw "Mock Redis executable not found: $exe"
+    }
+
+    $files = @()
+    $args = @("--port", $Port)
+    if ($InfoMode) {
+        $args += @("--info-mode", $InfoMode)
+    }
+    if ($InfoText) {
+        $file = New-Utf8TempFile -Name ("$Name.info.txt") -Content $InfoText
+        $files += $file
+        $args += @("--info-text-file", $file)
+    }
+    if ($InfoReplication) {
+        $file = New-Utf8TempFile -Name ("$Name.replication.txt") -Content $InfoReplication
+        $files += $file
+        $args += @("--info-replication-file", $file)
+    }
+    if ($InfoSentinel) {
+        $file = New-Utf8TempFile -Name ("$Name.sentinel.txt") -Content $InfoSentinel
+        $files += $file
+        $args += @("--info-sentinel-file", $file)
+    }
+    if ($ClusterNodes) {
+        $file = New-Utf8TempFile -Name ("$Name.cluster-nodes.txt") -Content $ClusterNodes
+        $files += $file
+        $args += @("--cluster-nodes-file", $file)
+    }
+
+    $outFile = Join-Path $PWD "target\$Name.mock.stdout.txt"
+    $errFile = Join-Path $PWD "target\$Name.mock.stderr.txt"
+    $proc = Start-Subscriber -Exe $exe -CommandArgs $args -OutFile $outFile -ErrFile $errFile -ReadyPattern 'MOCK_ADDR='
+    $stdout = Read-Utf8Text $outFile
+    $addr = ([regex]::Match($stdout, 'MOCK_ADDR=([^\r\n]+)').Groups[1].Value)
+    if (-not $addr) {
+        throw "Mock Redis did not expose address. Output:`n$stdout"
+    }
+
+    [pscustomobject]@{
+        Name = $Name
+        Process = $proc
+        Addr = $addr
+        OutFile = $outFile
+        ErrFile = $errFile
+        Files = $files
+    }
+}
+
+function Stop-MockRedis {
+    param($Server)
+
+    if ($null -ne $Server.Process -and -not $Server.Process.HasExited) {
+        Stop-Process -Id $Server.Process.Id -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($file in @($Server.Files) + @($Server.OutFile, $Server.ErrFile)) {
+        if ($file) {
+            Remove-Item $file -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ExistsOutput {
+    param(
+        [string]$Text,
+        [bool]$Expected,
+        [string]$Name
+    )
+
+    Assert-Text $Text ("exists=" + $Expected.ToString().ToLowerInvariant()) $Name
+}
+
+function Test-ReplicationInterop {
+    $prefix = "${Prefix}repl:"
+    $masterPort = 16380
+    $replicaPort = 16381
+    $masterAddr = "127.0.0.1:$masterPort"
+    $replicaAddr = "127.0.0.1:$replicaPort"
+    $masterInfo = "# Replication`r`nrole:master`r`nconnected_slaves:1`r`nslave0:ip=127.0.0.1,port=$replicaPort,state=online,offset=1,lag=0`r`n"
+    $replicaInfo = "# Replication`r`nrole:slave`r`nmaster_host:127.0.0.1`r`nmaster_port:$masterPort`r`nconnected_slaves:0`r`n"
+
+    $master = Start-MockRedis -Name "strict-repl-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes ""
+    $replica = Start-MockRedis -Name "strict-repl-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes ""
+    try {
+        $topologyConfig = "server=$masterAddr,$replicaAddr;db=0;mode=replication;readfromreplicas=true"
+        $masterConfig = "server=$masterAddr;db=0"
+        $replicaConfig = "server=$replicaAddr;db=0"
+
+        Invoke-RustDemo @("clean", "--config", $masterConfig, "--prefix", $prefix) | Out-Host
+        Invoke-RustDemo @("clean", "--config", $replicaConfig, "--prefix", $prefix) | Out-Host
+
+        Invoke-CSharpDemo @("write", "--config", $topologyConfig, "--prefix", $prefix) | Out-Host
+        $masterHas = Invoke-RustDemo @("exists", "--key", "csharp:marker", "--config", $masterConfig, "--prefix", $prefix)
+        $replicaMiss = Invoke-RustDemo @("exists", "--key", "csharp:marker", "--config", $replicaConfig, "--prefix", $prefix)
+        Test-ExistsOutput $masterHas $true "Replication write should land on master"
+        Test-ExistsOutput $replicaMiss $false "Replication write should not land on replica"
+
+        Invoke-RustDemo @("clean", "--config", $masterConfig, "--prefix", $prefix) | Out-Host
+        Invoke-RustDemo @("clean", "--config", $replicaConfig, "--prefix", $prefix) | Out-Host
+
+        Invoke-RustDemo @("write", "--config", $topologyConfig, "--prefix", $prefix) | Out-Host
+        $masterHasRust = Invoke-CSharpDemo @("exists", "--key", "rust:marker", "--config", $masterConfig, "--prefix", $prefix)
+        $replicaMissRust = Invoke-RustDemo @("exists", "--key", "rust:marker", "--config", $replicaConfig, "--prefix", $prefix)
+        Test-ExistsOutput $masterHasRust $true "Rust replication topology write should land on master"
+        Test-ExistsOutput $replicaMissRust $false "Rust replication topology write should not land on replica"
+    }
+    finally {
+        Stop-MockRedis $master
+        Stop-MockRedis $replica
+    }
+}
+
+function Test-SentinelInterop {
+    $prefix = "${Prefix}sentinel:"
+    $sentinelPort = 16382
+    $masterPort = 16383
+    $replicaPort = 16384
+    $sentinelAddr = "127.0.0.1:$sentinelPort"
+    $masterAddr = "127.0.0.1:$masterPort"
+    $replicaAddr = "127.0.0.1:$replicaPort"
+    $sentinelInfo = "# Sentinel`r`nredis_mode:sentinel`r`nsentinel_masters:1`r`nmaster0:name=redis-master,status=ok,address=$masterAddr,slaves=1,sentinels=1`r`n"
+    $masterInfo = "# Replication`r`nrole:master`r`nconnected_slaves:1`r`nslave0:ip=127.0.0.1,port=$replicaPort,state=online,offset=1,lag=0`r`n"
+    $replicaInfo = "# Replication`r`nrole:slave`r`nmaster_host:127.0.0.1`r`nmaster_port:$masterPort`r`nconnected_slaves:0`r`n"
+
+    $sentinel = Start-MockRedis -Name "strict-sentinel" -Port $sentinelPort -InfoMode "" -InfoText $sentinelInfo -InfoReplication "" -InfoSentinel $sentinelInfo -ClusterNodes ""
+    $master = Start-MockRedis -Name "strict-sentinel-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes ""
+    $replica = Start-MockRedis -Name "strict-sentinel-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes ""
+    try {
+        $topologyConfig = "server=$sentinelAddr;db=0;mode=sentinel;sentinelmastername=redis-master;readfromreplicas=true"
+        $masterConfig = "server=$masterAddr;db=0"
+        $replicaConfig = "server=$replicaAddr;db=0"
+
+        Invoke-RustDemo @("clean", "--config", $masterConfig, "--prefix", $prefix) | Out-Host
+        Invoke-RustDemo @("clean", "--config", $replicaConfig, "--prefix", $prefix) | Out-Host
+
+        Invoke-CSharpDemo @("write", "--config", $topologyConfig, "--prefix", $prefix) | Out-Host
+        $masterHas = Invoke-RustDemo @("exists", "--key", "csharp:marker", "--config", $masterConfig, "--prefix", $prefix)
+        $replicaMiss = Invoke-RustDemo @("exists", "--key", "csharp:marker", "--config", $replicaConfig, "--prefix", $prefix)
+        Test-ExistsOutput $masterHas $true "Sentinel write should land on discovered master"
+        Test-ExistsOutput $replicaMiss $false "Sentinel write should not land on replica"
+
+        Invoke-RustDemo @("clean", "--config", $masterConfig, "--prefix", $prefix) | Out-Host
+        Invoke-RustDemo @("clean", "--config", $replicaConfig, "--prefix", $prefix) | Out-Host
+
+        Invoke-RustDemo @("write", "--config", $topologyConfig, "--prefix", $prefix) | Out-Host
+        $masterHasRust = Invoke-CSharpDemo @("exists", "--key", "rust:marker", "--config", $masterConfig, "--prefix", $prefix)
+        $replicaMissRust = Invoke-RustDemo @("exists", "--key", "rust:marker", "--config", $replicaConfig, "--prefix", $prefix)
+        Test-ExistsOutput $masterHasRust $true "Rust sentinel topology write should land on discovered master"
+        Test-ExistsOutput $replicaMissRust $false "Rust sentinel topology write should not land on replica"
+    }
+    finally {
+        Stop-MockRedis $sentinel
+        Stop-MockRedis $master
+        Stop-MockRedis $replica
+    }
 }
 
 function Start-Subscriber {
@@ -284,6 +473,14 @@ Invoke-Step "Advanced helper/direct API interop" {
     $cVerifyAdvanced = Invoke-CSharpDemo @("verify-advanced", "--config", $Config, "--prefix", $Prefix)
     Assert-Text $rVerifyAdvanced 'rust:receipt' "Rust advanced verify did not write receipt"
     Assert-Text $cVerifyAdvanced 'csharp:receipt' "C# advanced verify did not write receipt"
+}
+
+Invoke-Step "Replication topology interop" {
+    Test-ReplicationInterop
+}
+
+Invoke-Step "Sentinel topology interop" {
+    Test-SentinelInterop
 }
 
 Invoke-Step "Reliable queue bidirectional consume/ack" {

@@ -14,6 +14,7 @@
 //! stream-status  ：查看流长度 / 消费组 / 挂起 / 消费者
 //! pubsub-publish / pubsub-subscribe ：跨语言 PubSub（普通/模式/分片）
 //! write-advanced / verify-advanced ：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION 等）
+//! exists：只读探针，检查某个键是否存在（给严格拓扑联调用）
 //! selftest：离线校验编码器字节格式（无需 Redis）
 //! report  ：查看双方回执
 //! clean   ：清理本 Demo 的键
@@ -188,6 +189,11 @@ fn run() -> i32 {
             0
         }
         "verify-advanced" => ctx.verify_advanced(),
+        "exists" => {
+            let key = opt("--key", "csharp:marker");
+            ctx.exists(&key);
+            0
+        }
         "report" => {
             ctx.report();
             0
@@ -203,7 +209,7 @@ fn run() -> i32 {
             code
         }
         other => {
-            println!("未知命令：{other}（可用：selftest/write/verify/write-advanced/verify-advanced/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+            println!("未知命令：{other}（可用：selftest/write/verify/write-advanced/verify-advanced/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
             2
         }
     };
@@ -875,6 +881,15 @@ impl DemoCtx {
                 json.unwrap_or_else(|| "无（对方尚未运行 verify）".into())
             );
         }
+    }
+
+    fn exists(&mut self, key: &str) {
+        let value = self.get_string(key).unwrap();
+        println!(
+            "[exists/{SIDE}] key={key} exists={} value={}",
+            value.is_some(),
+            value.unwrap_or_default()
+        );
     }
 
     // ---------------- PubSub ----------------
