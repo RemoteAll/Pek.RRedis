@@ -10,8 +10,14 @@
 //!   与 C# 调整 `Redis.Timeout` 的行为等价。
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::IpAddr;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme, StreamOwned};
 
 use crate::error::{Error, Result};
 use crate::resp::{Decoder, RespValue, encode_command};
@@ -33,13 +39,78 @@ pub struct ConnConfig {
     pub protocol_version: i32,
     /// 最大消息大小（字节）
     pub max_message_size: usize,
+    /// 是否启用 TLS。
+    pub tls: bool,
+    /// TLS ServerName/SNI。
+    pub tls_server_name: Option<String>,
+    /// 是否跳过证书校验（测试/自签名环境）。
+    pub tls_insecure: bool,
+}
+
+enum RedisStream {
+    Tcp(TcpStream),
+    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+impl RedisStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_read_timeout(timeout),
+            Self::Tls(stream) => stream.sock.set_read_timeout(timeout),
+        }
+    }
+
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        match self {
+            Self::Tcp(stream) => stream.read_timeout(),
+            Self::Tls(stream) => stream.sock.read_timeout(),
+        }
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_write_timeout(timeout),
+            Self::Tls(stream) => stream.sock.set_write_timeout(timeout),
+        }
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            Self::Tls(stream) => stream.sock.set_nonblocking(nonblocking),
+        }
+    }
+}
+
+impl Read for RedisStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buf),
+            Self::Tls(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for RedisStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(buf),
+            Self::Tls(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
 }
 
 /// 单条 TCP 连接上的 Redis 客户端。
 pub struct RedisClient {
     endpoint: String,
-    writer: TcpStream,
-    reader: BufReader<TcpStream>,
+    reader: BufReader<RedisStream>,
     max_message_size: usize,
     protocol_version: i32,
     user_name: Option<String>,
@@ -54,13 +125,11 @@ impl RedisClient {
     /// 建立连接并完成握手（HELLO / AUTH / SELECT）。
     pub fn connect(cfg: &ConnConfig) -> Result<Self> {
         let timeout = Duration::from_millis(if cfg.timeout_ms > 0 { cfg.timeout_ms } else { 3000 });
-        let stream = connect_tcp(&cfg.endpoint, timeout)?;
-        stream.set_nodelay(true).ok();
+        let stream = connect_stream(cfg, timeout)?;
 
         let mut client = Self {
             endpoint: cfg.endpoint.clone(),
-            reader: BufReader::with_capacity(16 * 1024, stream.try_clone()?),
-            writer: stream,
+            reader: BufReader::with_capacity(16 * 1024, stream),
             max_message_size: cfg.max_message_size,
             protocol_version: cfg.protocol_version,
             user_name: cfg.user_name.clone().filter(|s| !s.is_empty()),
@@ -70,8 +139,8 @@ impl RedisClient {
             selected_db: -1,
             broken: false,
         };
-        client.writer.set_read_timeout(Some(timeout))?;
-        client.writer.set_write_timeout(Some(timeout))?;
+        client.reader.get_mut().set_read_timeout(Some(timeout))?;
+        client.reader.get_mut().set_write_timeout(Some(timeout))?;
 
         client.handshake()?;
         Ok(client)
@@ -110,13 +179,14 @@ impl RedisClient {
     ///
     /// `block_seconds` 为命令自身的阻塞秒数（0 表示永久阻塞）。
     pub fn command_blocking(&mut self, args: &[&[u8]], block_seconds: i64) -> Result<RespValue> {
-        let previous = self.writer.read_timeout().ok().flatten();
+        let previous = self.reader.get_mut().read_timeout().ok().flatten();
         let extra = if block_seconds <= 0 { 60 } else { block_seconds + 2 };
-        self.writer
+        self.reader
+            .get_mut()
             .set_read_timeout(Some(Duration::from_secs(extra as u64)))?;
 
         let rs = self.command(args);
-        self.writer.set_read_timeout(previous)?;
+        self.reader.get_mut().set_read_timeout(previous)?;
 
         rs
     }
@@ -131,7 +201,7 @@ impl RedisClient {
 
     /// 调整读超时（订阅循环中用短超时以便及时响应取消）。
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<()> {
-        self.writer.set_read_timeout(timeout)?;
+        self.reader.get_mut().set_read_timeout(timeout)?;
         Ok(())
     }
 
@@ -141,9 +211,9 @@ impl RedisClient {
             let args: Vec<&[u8]> = cmd.iter().map(|a| a.as_slice()).collect();
             self.ensure_ready(&args)?;
             let frame = self.encode_frame(&args)?;
-            self.writer.write_all(&frame)?;
+            self.reader.get_mut().write_all(&frame)?;
         }
-        self.writer.flush()?;
+        self.reader.get_mut().flush()?;
 
         let mut results = Vec::with_capacity(cmds.len());
         for _ in 0..cmds.len() {
@@ -171,23 +241,16 @@ impl RedisClient {
         }
 
         // 再把套接字上已就绪的数据读掉（非阻塞）
-        if self.writer.set_nonblocking(true).is_ok() {
+        if self.reader.get_mut().set_nonblocking(true).is_ok() {
             let mut buf = [0u8; 4096];
-            let mut stream = match self.writer.try_clone() {
-                Ok(s) => s,
-                Err(_) => {
-                    let _ = self.writer.set_nonblocking(false);
-                    return;
-                }
-            };
             loop {
-                match stream.read(&mut buf) {
+                match self.reader.get_mut().read(&mut buf) {
                     Ok(0) => break,
                     Ok(_) => continue,
                     Err(_) => break,
                 }
             }
-            let _ = self.writer.set_nonblocking(false);
+            let _ = self.reader.get_mut().set_nonblocking(false);
         }
     }
 
@@ -320,7 +383,12 @@ impl RedisClient {
 
     fn write_frame(&mut self, args: &[&[u8]]) -> Result<()> {
         let frame = self.encode_frame(args)?;
-        if let Err(e) = self.writer.write_all(&frame).and_then(|_| self.writer.flush()) {
+        if let Err(e) = self
+            .reader
+            .get_mut()
+            .write_all(&frame)
+            .and_then(|_| self.reader.get_mut().flush())
+        {
             self.broken = true;
             return Err(Error::Io(e));
         }
@@ -398,8 +466,75 @@ fn connect_tcp(endpoint: &str, timeout: Duration) -> Result<TcpStream> {
     })))
 }
 
+fn connect_stream(cfg: &ConnConfig, timeout: Duration) -> Result<RedisStream> {
+    let stream = connect_tcp(&cfg.endpoint, timeout)?;
+    stream.set_nodelay(true).ok();
+    if !cfg.tls {
+        return Ok(RedisStream::Tcp(stream));
+    }
+
+    let server_name = server_name_for_endpoint(&cfg.endpoint, cfg.tls_server_name.as_deref())?;
+    let config = tls_client_config(cfg.tls_insecure);
+    let conn = ClientConnection::new(config, server_name)
+        .map_err(|e| Error::Io(std::io::Error::other(format!("TLS 连接初始化失败：{e}"))))?;
+    Ok(RedisStream::Tls(Box::new(StreamOwned::new(conn, stream))))
+}
+
+fn tls_client_config(insecure: bool) -> Arc<ClientConfig> {
+    let builder = ClientConfig::builder();
+
+    let mut config = if insecure {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+            .with_no_client_auth()
+    } else {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
+    config.alpn_protocols.clear();
+    Arc::new(config)
+}
+
+fn server_name_for_endpoint(endpoint: &str, override_name: Option<&str>) -> Result<ServerName<'static>> {
+    let name = override_name.unwrap_or_else(|| endpoint_host(endpoint));
+    if let Ok(ip) = name.parse::<IpAddr>() {
+        return Ok(ServerName::IpAddress(ip.into()));
+    }
+
+    ServerName::try_from(name.to_string())
+        .map_err(|_| Error::Config(format!("TLS ServerName 非法：{name}")))
+}
+
+fn endpoint_host(endpoint: &str) -> &str {
+    let endpoint = endpoint
+        .trim()
+        .strip_prefix("tcp://")
+        .or_else(|| endpoint.trim().strip_prefix("rediss://"))
+        .unwrap_or(endpoint.trim());
+
+    if let Some(rest) = endpoint.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return &rest[..end];
+    }
+
+    if let Some((host, _)) = endpoint.rsplit_once(':')
+        && endpoint.matches(':').count() == 1
+    {
+        return host;
+    }
+
+    endpoint
+}
+
 fn resolve(endpoint: &str) -> Result<Vec<std::net::SocketAddr>> {
-    let endpoint = endpoint.trim().strip_prefix("tcp://").unwrap_or(endpoint.trim());
+    let endpoint = endpoint
+        .trim()
+        .strip_prefix("tcp://")
+        .or_else(|| endpoint.trim().strip_prefix("rediss://"))
+        .unwrap_or(endpoint.trim());
     if endpoint.is_empty() {
         return Err(Error::Config("服务器地址为空".into()));
     }
@@ -427,9 +562,66 @@ fn resolve(endpoint: &str) -> Result<Vec<std::net::SocketAddr>> {
     Ok(result)
 }
 
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufReader, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection};
+
+    use crate::resp::Decoder;
 
     #[test]
     fn resolve_defaults_and_ports() {
@@ -440,5 +632,71 @@ mod tests {
     #[test]
     fn resolve_requires_content() {
         assert!(matches!(resolve("   "), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn resolve_strips_rediss_scheme() {
+        let addrs = resolve("rediss://127.0.0.1:6379").unwrap();
+        assert_eq!(addrs[0].to_string(), "127.0.0.1:6379");
+    }
+
+    #[test]
+    fn endpoint_host_supports_brackets_and_hostnames() {
+        assert_eq!(endpoint_host("rediss://cache.local:6380"), "cache.local");
+        assert_eq!(endpoint_host("[::1]:6379"), "::1");
+    }
+
+    #[test]
+    fn tls_connection_supports_basic_ping() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let certified = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_der = certified.cert.der().clone();
+        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.key_pair.serialize_der(),
+        ));
+
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+
+        let handle = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let conn = ServerConnection::new(Arc::new(config)).unwrap();
+            let mut reader = BufReader::new(StreamOwned::new(conn, socket));
+            let mut decoder = Decoder::new(&mut reader);
+            let value = decoder.read_value().unwrap();
+            let args: Vec<Vec<u8>> = match value {
+                RespValue::Array(items) => items
+                    .into_iter()
+                    .map(|item| item.as_bytes().unwrap_or_default())
+                    .collect(),
+                other => panic!("unexpected request: {other:?}"),
+            };
+            assert_eq!(args.first().map(|item| item.as_slice()), Some(&b"PING"[..]));
+            reader.get_mut().write_all(b"+PONG\r\n").unwrap();
+            reader.get_mut().flush().unwrap();
+        });
+
+        let mut client = RedisClient::connect(&ConnConfig {
+            endpoint: addr.to_string(),
+            user_name: None,
+            password: None,
+            db: 0,
+            timeout_ms: 3_000,
+            protocol_version: 0,
+            max_message_size: 1024,
+            tls: true,
+            tls_server_name: Some("localhost".into()),
+            tls_insecure: true,
+        })
+        .unwrap();
+
+        let rs = client.command(&[b"PING"]).unwrap();
+        assert_eq!(rs.as_string().as_deref(), Some("PONG"));
+
+        handle.join().unwrap();
     }
 }

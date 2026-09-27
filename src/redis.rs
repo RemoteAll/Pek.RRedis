@@ -14,17 +14,49 @@
 //!
 //! 网络异常自动重试（默认 3 次），服务端 `-ERR` 与 C# 一样立即抛出，不重试。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
+use crate::cluster::{ClusterNode, RedisClusterTopology, RedisReplicationTopology, Topology};
 use crate::client::{ConnConfig, RedisClient};
 use crate::encoder::{FromRedisPayload, ToRedisPayload};
 use crate::error::{Error, Result};
-use crate::options::RedisOptions;
+use crate::options::{RedisOptions, ServerMode};
 use crate::pool::Pool;
 use crate::resp::RespValue;
+
+#[derive(Clone, Copy)]
+struct RouteHint<'a> {
+    key: &'a str,
+    write: bool,
+}
+
+type KeyRouteEntry<'a> = (usize, &'a str);
+type KeyRouteGroup<'a> = (String, Vec<KeyRouteEntry<'a>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredSlave {
+    endpoint: String,
+    link_up: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredMaster {
+    name: Option<String>,
+    endpoint: String,
+    status: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ReplicationDiscovery {
+    role: Option<String>,
+    master_endpoint: Option<String>,
+    slaves: Vec<DiscoveredSlave>,
+    masters: Vec<DiscoveredMaster>,
+}
 
 /// 内部共享状态。
 pub struct RedisInner {
@@ -36,6 +68,14 @@ pub struct RedisInner {
     pub commands: AtomicU64,
     /// 失败命令数
     pub errors: AtomicU64,
+    /// 可选拓扑选择器（cluster/sentinel/replication）。
+    pub topology: RwLock<Option<Arc<dyn Topology>>>,
+    /// endpoint -> 定向连接客户端缓存。
+    pub endpoint_clients: Mutex<HashMap<String, Redis>>,
+    /// 拓扑初始化锁，避免并发重复加载。
+    pub topology_init: Mutex<()>,
+    /// 最近一次拓扑刷新时间。
+    pub topology_refreshed_at: Mutex<Option<Instant>>,
 }
 
 /// Redis 客户端。克隆共享同一个连接池与配置。
@@ -72,6 +112,9 @@ impl Redis {
             let max_size = options.max_message_size;
             let user_name = options.user_name.clone();
             let password = options.password.clone();
+            let tls = options.tls;
+            let tls_server_name = options.tls_server_name.clone();
+            let tls_insecure = options.tls_insecure;
             let db = options.db;
 
             move || -> Result<RedisClient> {
@@ -89,6 +132,9 @@ impl Redis {
                         timeout_ms: timeout,
                         protocol_version: proto,
                         max_message_size: max_size,
+                        tls,
+                        tls_server_name: tls_server_name.clone(),
+                        tls_insecure,
                     };
                     match RedisClient::connect(&cfg) {
                         Ok(c) => return Ok(c),
@@ -108,6 +154,10 @@ impl Redis {
                 pool,
                 commands: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
+                topology: RwLock::new(None),
+                endpoint_clients: Mutex::new(HashMap::new()),
+                topology_init: Mutex::new(()),
+                topology_refreshed_at: Mutex::new(None),
             }),
         })
     }
@@ -140,6 +190,19 @@ impl Redis {
         )
     }
 
+    /// 设置拓扑选择器。配置后，支持按 key 路由到指定节点执行命令。
+    pub fn set_topology(&self, topology: Arc<dyn Topology>) {
+        *self.inner.topology.write().unwrap() = Some(topology);
+        *self.inner.topology_refreshed_at.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// 清空拓扑选择器，恢复普通多地址轮询行为。
+    pub fn clear_topology(&self) {
+        *self.inner.topology.write().unwrap() = None;
+        self.inner.endpoint_clients.lock().unwrap().clear();
+        *self.inner.topology_refreshed_at.lock().unwrap() = None;
+    }
+
     /// 服务器地址（逗号分隔）。
     pub fn server(&self) -> String {
         self.inner.options.servers.join(",")
@@ -162,6 +225,9 @@ impl Redis {
             timeout_ms: o.timeout_ms,
             protocol_version: o.protocol_version,
             max_message_size: o.max_message_size,
+            tls: o.tls,
+            tls_server_name: o.tls_server_name.clone(),
+            tls_insecure: o.tls_insecure,
         }
     }
 
@@ -169,12 +235,12 @@ impl Redis {
 
     /// 执行命令（带重试）。
     pub fn execute(&self, args: &[&[u8]]) -> Result<RespValue> {
-        self.execute_inner(args, None)
+        self.execute_inner(args, None, None)
     }
 
     /// 执行阻塞命令（BRPOP / BRPOPLPUSH / BLMOVE 等）。
     pub fn execute_blocking(&self, args: &[&[u8]], block_seconds: i64) -> Result<RespValue> {
-        self.execute_inner(args, Some(block_seconds))
+        self.execute_inner(args, Some(block_seconds), None)
     }
 
     /// 执行命令并忽略应答（用于无需结果的写操作）。
@@ -182,27 +248,120 @@ impl Redis {
         self.execute(args).map(|_| ())
     }
 
-    fn execute_inner(&self, args: &[&[u8]], block: Option<i64>) -> Result<RespValue> {
+    fn execute_on_key(&self, key: &str, write: bool, args: &[&[u8]]) -> Result<RespValue> {
+        self.execute_inner(args, None, Some(RouteHint { key, write }))
+    }
+
+    fn execute_inner(
+        &self,
+        args: &[&[u8]],
+        block: Option<i64>,
+        route: Option<RouteHint<'_>>,
+    ) -> Result<RespValue> {
+        let result = self.execute_inner_routed(args, block, route);
+        match result {
+            Ok(value) => {
+                self.inner.commands.fetch_add(1, Ordering::Relaxed);
+                Ok(value)
+            }
+            Err(err) => {
+                self.inner.errors.fetch_add(1, Ordering::Relaxed);
+                Err(err)
+            }
+        }
+    }
+
+    fn execute_inner_routed(
+        &self,
+        args: &[&[u8]],
+        block: Option<i64>,
+        route: Option<RouteHint<'_>>,
+    ) -> Result<RespValue> {
+        if route.is_some() {
+            self.ensure_topology()?;
+        }
+        if let Some(route) = route
+            && let Some(topology) = self.topology() 
+            && let Some(node) = topology.select_node(route.key, route.write)
+        {
+            let mut current = node;
+            let mut send_asking = false;
+
+            for redirect_count in 0..=5 {
+                match self.execute_on_endpoint(&current.endpoint, args, block, send_asking) {
+                    Ok(value) => {
+                        topology.reset_node(&current.endpoint);
+                        return Ok(value);
+                    }
+                    Err(Error::Server(message)) => {
+                        if let Some(redirect) = parse_redirect(&message) {
+                            if redirect_count == 5 {
+                                return Err(Error::Operation(format!(
+                                    "cluster 重定向次数过多：key=[{}] error=[{}]",
+                                    route.key, message
+                                )));
+                            }
+                            if redirect.kind == RedirectKind::Moved {
+                                topology.remember_redirect(redirect.slot, redirect.endpoint, true);
+                            }
+                            current = topology
+                                .map_endpoint(redirect.endpoint, Some(route.key))
+                                .unwrap_or_else(|| ClusterNode::new(redirect.endpoint.to_string()));
+                            send_asking = redirect.kind == RedirectKind::Ask;
+                            continue;
+                        }
+                        return Err(Error::Server(message));
+                    }
+                    Err(err) => {
+                        if let Some(next) = topology.reselect_node(route.key, route.write, &current)
+                        {
+                            current = next;
+                            send_asking = false;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        self.execute_with_pool(&self.inner.pool, args, block, false)
+    }
+
+    fn execute_on_endpoint(
+        &self,
+        endpoint: &str,
+        args: &[&[u8]],
+        block: Option<i64>,
+        send_asking: bool,
+    ) -> Result<RespValue> {
+        let redis = self.redis_for_endpoint(endpoint)?;
+        self.execute_with_pool(&redis.inner.pool, args, block, send_asking)
+    }
+
+    fn execute_with_pool(
+        &self,
+        pool: &Arc<Pool>,
+        args: &[&[u8]],
+        block: Option<i64>,
+        send_asking: bool,
+    ) -> Result<RespValue> {
         let attempts = self.inner.options.retry.max(1);
         let mut last_err: Option<Error> = None;
 
         for attempt in 0..attempts {
-            let mut client = self.inner.pool.get()?;
+            let mut client = pool.get()?;
+            if send_asking {
+                client.command(&[b"ASKING"])?;
+            }
             let result = match block {
                 Some(seconds) => client.command_blocking(args, seconds),
                 None => client.command(args),
             };
 
             match result {
-                Ok(v) => {
-                    self.inner.commands.fetch_add(1, Ordering::Relaxed);
-                    return Ok(v);
-                }
-                Err(Error::Server(msg)) => {
-                    // 服务端错误与 C# 一致：立即抛出，不重试
-                    self.inner.errors.fetch_add(1, Ordering::Relaxed);
-                    return Err(Error::Server(msg));
-                }
+                Ok(v) => return Ok(v),
+                Err(Error::Server(msg)) => return Err(Error::Server(msg)),
                 Err(e) => {
                     last_err = Some(e);
                     // 连接在此处随 PooledClient 析构被标记损坏并销毁
@@ -214,8 +373,319 @@ impl Redis {
             }
         }
 
-        self.inner.errors.fetch_add(1, Ordering::Relaxed);
         Err(last_err.unwrap_or_else(|| Error::Pool("命令执行失败且无错误信息".into())))
+    }
+
+    fn topology(&self) -> Option<Arc<dyn Topology>> {
+        self.inner.topology.read().unwrap().clone()
+    }
+
+    fn redis_for_endpoint(&self, endpoint: &str) -> Result<Redis> {
+        if let Some(redis) = self.inner.endpoint_clients.lock().unwrap().get(endpoint).cloned() {
+            return Ok(redis);
+        }
+
+        let mut options = self.inner.options.clone();
+        options.servers = vec![endpoint.to_string()];
+        options.mode = ServerMode::Standalone;
+        options.auto_detect = false;
+        options.pool.min = 0;
+
+        let redis = Redis::new(options)?;
+        let mut cache = self.inner.endpoint_clients.lock().unwrap();
+        Ok(cache
+            .entry(endpoint.to_string())
+            .or_insert_with(|| redis.clone())
+            .clone())
+    }
+
+    fn route_key_groups<'a>(
+        &self,
+        keys: &[&'a str],
+        write: bool,
+    ) -> Result<Option<Vec<KeyRouteGroup<'a>>>> {
+        self.ensure_topology()?;
+        let Some(topology) = self.topology() else {
+            return Ok(None);
+        };
+
+        let mut groups: Vec<KeyRouteGroup<'a>> = Vec::new();
+        let mut indexes: HashMap<String, usize> = HashMap::new();
+
+        for (index, key) in keys.iter().copied().enumerate() {
+            let node = topology.select_node(key, write).ok_or_else(|| {
+                Error::Operation(format!("集群模式下未找到 key [{key}] 的可用节点"))
+            })?;
+            if let Some(group_index) = indexes.get(&node.endpoint).copied() {
+                groups[group_index].1.push((index, key));
+            } else {
+                let group_index = groups.len();
+                indexes.insert(node.endpoint.clone(), group_index);
+                groups.push((node.endpoint, vec![(index, key)]));
+            }
+        }
+
+        Ok(Some(groups))
+    }
+
+    fn cluster_query_endpoints(&self) -> Result<Option<Vec<String>>> {
+        self.ensure_topology()?;
+        let Some(topology) = self.topology() else {
+            return Ok(None);
+        };
+        let nodes = topology.nodes();
+
+        let mut endpoints = Vec::new();
+        let mut push_unique = |endpoint: &str| {
+            if !endpoints.iter().any(|item| item == endpoint) {
+                endpoints.push(endpoint.to_string());
+            }
+        };
+
+        let primaries: Vec<_> = nodes.iter().filter(|node| !node.is_replica).collect();
+        if !primaries.is_empty() {
+            for node in primaries {
+                push_unique(&node.endpoint);
+            }
+        } else {
+            for node in &nodes {
+                push_unique(&node.endpoint);
+            }
+        }
+
+        Ok(Some(endpoints))
+    }
+
+    fn ensure_topology(&self) -> Result<()> {
+        if self.topology().is_some() && !self.topology_refresh_due() {
+            return Ok(());
+        }
+
+        let wanted_mode = match self.inner.options.mode {
+            ServerMode::Cluster => Some(ServerMode::Cluster),
+            ServerMode::Replication => Some(ServerMode::Replication),
+            ServerMode::Sentinel => Some(ServerMode::Sentinel),
+            ServerMode::Auto if self.inner.options.auto_detect => self.detect_topology_mode()?,
+            _ => None,
+        };
+        let Some(wanted_mode) = wanted_mode else {
+            return Ok(());
+        };
+
+        let _guard = self.inner.topology_init.lock().unwrap();
+        if self.topology().is_some() && !self.topology_refresh_due() {
+            return Ok(());
+        }
+
+        let topology = self.load_topology(wanted_mode)?;
+        self.set_topology(topology);
+        Ok(())
+    }
+
+    fn topology_refresh_due(&self) -> bool {
+        if self.topology().is_none() {
+            return true;
+        }
+
+        let seconds = self.inner.options.topology_refresh_seconds;
+        if seconds == 0 {
+            return true;
+        }
+
+        self.inner
+            .topology_refreshed_at
+            .lock()
+            .unwrap()
+            .map(|ts| ts.elapsed() >= Duration::from_secs(seconds))
+            .unwrap_or(true)
+    }
+
+    fn detect_topology_mode(&self) -> Result<Option<ServerMode>> {
+        let info = self.fetch_info(None, None)?;
+        Ok(detect_topology_mode_from_info(
+            &info,
+            self.inner.options.endpoints().len(),
+        ))
+    }
+
+    fn load_topology(&self, mode: ServerMode) -> Result<Arc<dyn Topology>> {
+        match mode {
+            ServerMode::Cluster => self.load_cluster_topology(None),
+            ServerMode::Replication => self.load_replication_topology(
+                self.inner.options.endpoints(),
+                ServerMode::Replication,
+            ),
+            ServerMode::Sentinel => self.load_sentinel_topology(),
+            _ => Err(Error::Operation(format!("不支持的拓扑模式初始化：{mode:?}"))),
+        }
+    }
+
+    fn load_cluster_topology(&self, endpoint: Option<&str>) -> Result<Arc<dyn Topology>> {
+        let nodes = match endpoint {
+            Some(endpoint) => self
+                .execute_on_endpoint(endpoint, &[b"CLUSTER", b"NODES"], None, false)?
+                .as_string(),
+            None => self
+                .execute_with_pool(&self.inner.pool, &[b"CLUSTER", b"NODES"], None, false)?
+                .as_string(),
+        }
+        .ok_or_else(|| Error::Protocol("CLUSTER NODES 返回结构非法".into()))?;
+
+        Ok(Arc::new(RedisClusterTopology::from_cluster_nodes(
+            &nodes,
+            self.inner.options.read_from_replicas,
+        )))
+    }
+
+    fn load_replication_topology(
+        &self,
+        seeds: Vec<String>,
+        mode: ServerMode,
+    ) -> Result<Arc<dyn Topology>> {
+        let mut pending: VecDeque<String> = seeds.into_iter().collect();
+        let mut seen = HashSet::new();
+        let mut discovered: HashMap<String, ClusterNode> = HashMap::new();
+        let mut last_error: Option<Error> = None;
+
+        while let Some(endpoint) = pending.pop_front() {
+            if !seen.insert(endpoint.clone()) {
+                continue;
+            }
+
+            match self.fetch_info(Some(&endpoint), Some("Replication")) {
+                Ok(info) => {
+                    let parsed = parse_replication_discovery(&info);
+                    let role_is_slave = parsed
+                        .role
+                        .as_deref()
+                        .map(|role| role.eq_ignore_ascii_case("slave"))
+                        .unwrap_or(false);
+                    let master_endpoint = parsed.master_endpoint.clone();
+                    let slaves = parsed.slaves;
+
+                    {
+                        let node = discovered
+                            .entry(endpoint.clone())
+                            .or_insert_with(|| ClusterNode::new(endpoint.clone()));
+                        node.link_up = true;
+                        node.is_replica = role_is_slave;
+                        if let Some(master_endpoint) = &master_endpoint {
+                            node.master_id = Some(master_endpoint.clone());
+                        }
+                    }
+
+                    if let Some(master_endpoint) = master_endpoint {
+                        let node = discovered
+                            .entry(master_endpoint.clone())
+                            .or_insert_with(|| ClusterNode::new(master_endpoint.clone()));
+                        node.is_replica = false;
+                        pending.push_back(master_endpoint);
+                    }
+
+                    if !role_is_slave {
+                        for slave in slaves {
+                            let slave_endpoint = slave.endpoint.clone();
+                            let node = discovered
+                                .entry(slave_endpoint.clone())
+                                .or_insert_with(|| ClusterNode::new(slave_endpoint.clone()));
+                            node.is_replica = true;
+                            node.link_up = slave.link_up;
+                            node.master_id = Some(endpoint.clone());
+                            pending.push_back(slave_endpoint);
+                        }
+                    }
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    if let Some(node) = discovered.get_mut(&endpoint) {
+                        node.link_up = false;
+                    } else if discovered.is_empty() {
+                        return Err(last_error.expect("replication info error should exist"));
+                    } else {
+                        let mut node = ClusterNode::new(endpoint.clone());
+                        node.link_up = false;
+                        discovered.insert(endpoint, node);
+                    }
+                }
+            }
+        }
+
+        if discovered.is_empty() {
+            return Err(last_error.unwrap_or_else(|| Error::Operation("未发现主从节点信息".into())));
+        }
+
+        Ok(Arc::new(RedisReplicationTopology::new(
+            mode,
+            discovered.into_values().collect(),
+            self.inner.options.read_from_replicas,
+        )))
+    }
+
+    fn load_sentinel_topology(&self) -> Result<Arc<dyn Topology>> {
+        let mut last_error: Option<Error> = None;
+        let mut masters = Vec::new();
+
+        for endpoint in self.inner.options.endpoints() {
+            match self.fetch_info(Some(&endpoint), Some("Sentinel")) {
+                Ok(info) => {
+                    masters = parse_replication_discovery(&info).masters;
+                    if !masters.is_empty() {
+                        break;
+                    }
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        let seeds: Vec<String> = masters
+            .into_iter()
+            .filter(|master| {
+                self.inner
+                    .options
+                    .sentinel_master_name
+                    .as_deref()
+                    .map(|name| {
+                        master
+                            .name
+                            .as_deref()
+                            .map(|value| value.eq_ignore_ascii_case(name))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(true)
+            })
+            .map(|master| master.endpoint)
+            .collect();
+
+        if seeds.is_empty() {
+            return Err(last_error.unwrap_or_else(|| Error::Operation("哨兵未返回可用主节点".into())));
+        }
+
+        let info = self.fetch_info(Some(&seeds[0]), None)?;
+        match detect_topology_mode_from_info(&info, seeds.len()) {
+            Some(ServerMode::Cluster) => self.load_cluster_topology(Some(&seeds[0])),
+            _ => self.load_replication_topology(seeds, ServerMode::Sentinel),
+        }
+    }
+
+    fn fetch_info(&self, endpoint: Option<&str>, section: Option<&str>) -> Result<HashMap<String, String>> {
+        Ok(parse_info(&self.fetch_info_text(endpoint, section)?))
+    }
+
+    fn fetch_info_text(&self, endpoint: Option<&str>, section: Option<&str>) -> Result<String> {
+        let value = match (endpoint, section) {
+            (Some(endpoint), Some(section)) => {
+                self.execute_on_endpoint(endpoint, &[b"INFO", section.as_bytes()], None, false)?
+            }
+            (Some(endpoint), None) => self.execute_on_endpoint(endpoint, &[b"INFO"], None, false)?,
+            (None, Some(section)) => {
+                self.execute_with_pool(&self.inner.pool, &[b"INFO", section.as_bytes()], None, false)?
+            }
+            (None, None) => self.execute_with_pool(&self.inner.pool, &[b"INFO"], None, false)?,
+        };
+
+        value
+            .as_string()
+            .ok_or_else(|| Error::Protocol("INFO 返回结构非法".into()))
     }
 
     /// 在独占连接上执行自定义逻辑（自动从池中借还）。
@@ -231,6 +701,16 @@ impl Redis {
 
     /// 数据库键数量（`DBSIZE`）。
     pub fn dbsize(&self) -> Result<i64> {
+        if let Some(endpoints) = self.cluster_query_endpoints()? {
+            let mut total = 0i64;
+            for endpoint in endpoints {
+                total += self
+                    .execute_on_endpoint(&endpoint, &[b"DBSIZE"], None, false)?
+                    .as_i64()
+                    .unwrap_or(0);
+            }
+            return Ok(total);
+        }
         Ok(self.execute(&[b"DBSIZE"])?.as_i64().unwrap_or(0))
     }
 
@@ -246,6 +726,23 @@ impl Redis {
 
     /// 按模式获取键（`KEYS pattern`，生产环境慎用）。
     pub fn keys_raw(&self, pattern: &str) -> Result<Vec<String>> {
+        if let Some(endpoints) = self.cluster_query_endpoints()? {
+            let mut result = Vec::new();
+            for endpoint in endpoints {
+                let items = self
+                    .execute_on_endpoint(&endpoint, &[b"KEYS", pattern.as_bytes()], None, false)?
+                    .into_array()
+                    .unwrap_or_default();
+                for item in items {
+                    if let Some(key) = item.as_string()
+                        && !result.iter().any(|existing| existing == &key)
+                    {
+                        result.push(key);
+                    }
+                }
+            }
+            return Ok(result);
+        }
         let rs = self.execute(&[b"KEYS", pattern.as_bytes()])?;
         Ok(rs
             .into_array()
@@ -258,7 +755,7 @@ impl Redis {
     /// 是否存在（`EXISTS`）。
     pub fn contains_key(&self, key: &str) -> Result<bool> {
         Ok(self
-            .execute(&[b"EXISTS", key.as_bytes()])?
+            .execute_on_key(key, false, &[b"EXISTS", key.as_bytes()])?
             .as_i64()
             .unwrap_or(0)
             > 0)
@@ -269,13 +766,31 @@ impl Redis {
         if key.is_empty() {
             return Ok(0);
         }
-        Ok(self.execute(&[b"DEL", key.as_bytes()])?.as_i64().unwrap_or(0))
+        Ok(self
+            .execute_on_key(key, true, &[b"DEL", key.as_bytes()])?
+            .as_i64()
+            .unwrap_or(0))
     }
 
     /// 批量删除（`DEL key...`）。
     pub fn remove_many(&self, keys: &[&str]) -> Result<i64> {
         if keys.is_empty() {
             return Ok(0);
+        }
+        if let Some(groups) = self.route_key_groups(keys, true)? {
+            let mut total = 0i64;
+            for (endpoint, entries) in groups {
+                let mut args: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                args.push(b"DEL");
+                for (_, key) in &entries {
+                    args.push(key.as_bytes());
+                }
+                total += self
+                    .execute_on_endpoint(&endpoint, &args, None, false)?
+                    .as_i64()
+                    .unwrap_or(0);
+            }
+            return Ok(total);
         }
         let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
         args.push(b"DEL");
@@ -288,7 +803,7 @@ impl Redis {
     /// 设置过期时间（秒）（`EXPIRE`）。
     pub fn set_expire(&self, key: &str, seconds: i64) -> Result<bool> {
         Ok(self
-            .execute(&[b"EXPIRE", key.as_bytes(), seconds.to_string().as_bytes()])?
+            .execute_on_key(key, true, &[b"EXPIRE", key.as_bytes(), seconds.to_string().as_bytes()])?
             .as_i64()
             .unwrap_or(0)
             == 1)
@@ -297,7 +812,11 @@ impl Redis {
     /// 设置过期时间（毫秒）（`PEXPIRE`）。
     pub fn set_expire_ms(&self, key: &str, milliseconds: i64) -> Result<bool> {
         Ok(self
-            .execute(&[b"PEXPIRE", key.as_bytes(), milliseconds.to_string().as_bytes()])?
+            .execute_on_key(
+                key,
+                true,
+                &[b"PEXPIRE", key.as_bytes(), milliseconds.to_string().as_bytes()],
+            )?
             .as_i64()
             .unwrap_or(0)
             == 1)
@@ -305,18 +824,24 @@ impl Redis {
 
     /// 获取剩余有效期（秒）（`TTL`）。-1 永不过期，-2 键不存在。
     pub fn get_expire(&self, key: &str) -> Result<i64> {
-        Ok(self.execute(&[b"TTL", key.as_bytes()])?.as_i64().unwrap_or(-2))
+        Ok(self
+            .execute_on_key(key, false, &[b"TTL", key.as_bytes()])?
+            .as_i64()
+            .unwrap_or(-2))
     }
 
     /// 获取剩余有效期（毫秒）（`PTTL`）。
     pub fn get_expire_ms(&self, key: &str) -> Result<i64> {
-        Ok(self.execute(&[b"PTTL", key.as_bytes()])?.as_i64().unwrap_or(-2))
+        Ok(self
+            .execute_on_key(key, false, &[b"PTTL", key.as_bytes()])?
+            .as_i64()
+            .unwrap_or(-2))
     }
 
     /// 移除过期时间（`PERSIST`）。
     pub fn persist(&self, key: &str) -> Result<bool> {
         Ok(self
-            .execute(&[b"PERSIST", key.as_bytes()])?
+            .execute_on_key(key, true, &[b"PERSIST", key.as_bytes()])?
             .as_i64()
             .unwrap_or(0)
             == 1)
@@ -324,7 +849,9 @@ impl Redis {
 
     /// 键类型（`TYPE`），不存在返回 `None`。
     pub fn type_of(&self, key: &str) -> Result<Option<String>> {
-        let s = self.execute(&[b"TYPE", key.as_bytes()])?.as_string();
+        let s = self
+            .execute_on_key(key, false, &[b"TYPE", key.as_bytes()])?
+            .as_string();
         match s.as_deref() {
             Some("none") | None => Ok(None),
             _ => Ok(s),
@@ -334,7 +861,7 @@ impl Redis {
     /// 重命名（`RENAME` / `RENAMENX`）。
     pub fn rename(&self, key: &str, new_key: &str, overwrite: bool) -> Result<bool> {
         let cmd: &[u8] = if overwrite { b"RENAME" } else { b"RENAMENX" };
-        let rs = self.execute(&[cmd, key.as_bytes(), new_key.as_bytes()])?;
+        let rs = self.execute_on_key(key, true, &[cmd, key.as_bytes(), new_key.as_bytes()])?;
         if overwrite {
             Ok(rs.as_string().as_deref() == Some("OK"))
         } else {
@@ -346,6 +873,21 @@ impl Redis {
     pub fn unlink(&self, keys: &[&str]) -> Result<i64> {
         if keys.is_empty() {
             return Ok(0);
+        }
+        if let Some(groups) = self.route_key_groups(keys, true)? {
+            let mut total = 0i64;
+            for (endpoint, entries) in groups {
+                let mut args: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                args.push(b"UNLINK");
+                for (_, key) in &entries {
+                    args.push(key.as_bytes());
+                }
+                total += self
+                    .execute_on_endpoint(&endpoint, &args, None, false)?
+                    .as_i64()
+                    .unwrap_or(0);
+            }
+            return Ok(total);
         }
         let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
         args.push(b"UNLINK");
@@ -359,6 +901,21 @@ impl Redis {
     pub fn touch(&self, keys: &[&str]) -> Result<i64> {
         if keys.is_empty() {
             return Ok(0);
+        }
+        if let Some(groups) = self.route_key_groups(keys, true)? {
+            let mut total = 0i64;
+            for (endpoint, entries) in groups {
+                let mut args: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                args.push(b"TOUCH");
+                for (_, key) in &entries {
+                    args.push(key.as_bytes());
+                }
+                total += self
+                    .execute_on_endpoint(&endpoint, &args, None, false)?
+                    .as_i64()
+                    .unwrap_or(0);
+            }
+            return Ok(total);
         }
         let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
         args.push(b"TOUCH");
@@ -383,7 +940,7 @@ impl Redis {
             args.push(b"REPLACE".to_vec());
         }
         let refs: Vec<&[u8]> = args.iter().map(|a| a.as_slice()).collect();
-        Ok(self.execute(&refs)?.as_i64().unwrap_or(0) == 1)
+        Ok(self.execute_on_key(source, true, &refs)?.as_i64().unwrap_or(0) == 1)
     }
 
     /// 随机键（`RANDOMKEY`）。
@@ -399,7 +956,7 @@ impl Redis {
     /// 键内存占用（`MEMORY USAGE`），不存在返回 `None`。
     pub fn memory_usage(&self, key: &str, samples: i32) -> Result<Option<i64>> {
         let rs = if samples > 0 {
-            self.execute(&[
+            self.execute_on_key(key, false, &[
                 b"MEMORY",
                 b"USAGE",
                 key.as_bytes(),
@@ -407,14 +964,14 @@ impl Redis {
                 samples.to_string().as_bytes(),
             ])?
         } else {
-            self.execute(&[b"MEMORY", b"USAGE", key.as_bytes()])?
+            self.execute_on_key(key, false, &[b"MEMORY", b"USAGE", key.as_bytes()])?
         };
         Ok(rs.as_i64())
     }
 
     /// 对象内部编码（`OBJECT ENCODING`）。
     pub fn object_encoding(&self, key: &str) -> Result<Option<String>> {
-        let rs = self.execute(&[b"OBJECT", b"ENCODING", key.as_bytes()])?;
+        let rs = self.execute_on_key(key, false, &[b"OBJECT", b"ENCODING", key.as_bytes()])?;
         if rs.is_null() {
             Ok(None)
         } else {
@@ -425,6 +982,44 @@ impl Redis {
     /// 单步 SCAN。返回 `(下一个游标, 键列表)`；游标为 0 表示遍历结束。
     pub fn scan(&self, cursor: u64, pattern: &str, count: usize) -> Result<(u64, Vec<String>)> {
         let count = if count == 0 { 100 } else { count };
+        if let Some(endpoints) = self.cluster_query_endpoints()? {
+            if cursor != 0 {
+                return Ok((0, Vec::new()));
+            }
+
+            let mut keys = Vec::new();
+            for endpoint in endpoints {
+                let mut items = self
+                    .execute_on_endpoint(
+                        &endpoint,
+                        &[
+                            b"SCAN",
+                            b"0",
+                            b"MATCH",
+                            pattern.as_bytes(),
+                            b"COUNT",
+                            count.to_string().as_bytes(),
+                        ],
+                        None,
+                        false,
+                    )?
+                    .into_array()
+                    .ok_or_else(|| Error::Protocol("SCAN 返回结构非法".into()))?;
+                if items.len() != 2 {
+                    return Err(Error::Protocol("SCAN 返回结构非法".into()));
+                }
+                let list = items.pop().unwrap().into_array().unwrap_or_default();
+                for item in list {
+                    if let Some(key) = item.as_string()
+                        && !keys.iter().any(|existing| existing == &key)
+                    {
+                        keys.push(key);
+                    }
+                }
+            }
+            return Ok((0, keys));
+        }
+
         let rs = self.execute(&[
             b"SCAN",
             cursor.to_string().as_bytes(),
@@ -472,9 +1067,9 @@ impl Redis {
         let key = key.as_ref();
 
         let rs = if expire <= 0 {
-            self.execute(&[b"SET", key.as_bytes(), &payload])?
+            self.execute_on_key(key, true, &[b"SET", key.as_bytes(), &payload])?
         } else {
-            self.execute(&[
+            self.execute_on_key(key, true, &[
                 b"SETEX",
                 key.as_bytes(),
                 expire.to_string().as_bytes(),
@@ -487,7 +1082,7 @@ impl Redis {
 
     /// 获取原始字节值。键不存在返回 `None`。
     pub fn get_raw(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let rs = self.execute(&[b"GET", key.as_bytes()])?;
+        let rs = self.execute_on_key(key, false, &[b"GET", key.as_bytes()])?;
         if rs.is_null() {
             return Ok(None);
         }
@@ -523,7 +1118,7 @@ impl Redis {
         let key = key.as_ref();
 
         let rs = if expire > 0 {
-            self.execute(&[
+            self.execute_on_key(key, true, &[
                 b"SET",
                 key.as_bytes(),
                 &payload,
@@ -532,7 +1127,7 @@ impl Redis {
                 b"NX",
             ])?
         } else {
-            self.execute(&[b"SET", key.as_bytes(), &payload, b"NX"])?
+            self.execute_on_key(key, true, &[b"SET", key.as_bytes(), &payload, b"NX"])?
         };
 
         Ok(!rs.is_null())
@@ -545,7 +1140,7 @@ impl Redis {
         value: T,
     ) -> Result<Option<T>> {
         let payload = value.to_redis_payload()?.unwrap_or_default();
-        let rs = self.execute(&[b"GETSET", key.as_bytes(), &payload])?;
+        let rs = self.execute_on_key(key, true, &[b"GETSET", key.as_bytes(), &payload])?;
         if rs.is_null() {
             return Ok(None);
         }
@@ -572,7 +1167,7 @@ impl Redis {
         args.push(b"GET".to_vec());
 
         let refs: Vec<&[u8]> = args.iter().map(|a| a.as_slice()).collect();
-        let rs = self.execute(&refs)?;
+        let rs = self.execute_on_key(key, true, &refs)?;
         if rs.is_null() {
             return Ok(None);
         }
@@ -582,20 +1177,23 @@ impl Redis {
     /// 追加内容（`APPEND`），返回追加后的长度。
     pub fn append(&self, key: &str, value: &str) -> Result<i64> {
         Ok(self
-            .execute(&[b"APPEND", key.as_bytes(), value.as_bytes()])?
+            .execute_on_key(key, true, &[b"APPEND", key.as_bytes(), value.as_bytes()])?
             .as_i64()
             .unwrap_or(0))
     }
 
     /// 字符串长度（`STRLEN`）。
     pub fn strlen(&self, key: &str) -> Result<i64> {
-        Ok(self.execute(&[b"STRLEN", key.as_bytes()])?.as_i64().unwrap_or(0))
+        Ok(self
+            .execute_on_key(key, false, &[b"STRLEN", key.as_bytes()])?
+            .as_i64()
+            .unwrap_or(0))
     }
 
     /// 截取子串（`GETRANGE`，含头含尾，-1 表示末尾）。
     pub fn get_range(&self, key: &str, start: i64, end: i64) -> Result<String> {
         Ok(self
-            .execute(&[
+            .execute_on_key(key, false, &[
                 b"GETRANGE",
                 key.as_bytes(),
                 start.to_string().as_bytes(),
@@ -608,7 +1206,7 @@ impl Redis {
     /// 覆盖区间（`SETRANGE`），返回新长度。
     pub fn set_range(&self, key: &str, offset: i64, value: &str) -> Result<i64> {
         Ok(self
-            .execute(&[
+            .execute_on_key(key, true, &[
                 b"SETRANGE",
                 key.as_bytes(),
                 offset.to_string().as_bytes(),
@@ -621,16 +1219,16 @@ impl Redis {
     /// 自增（`INCR` / `INCRBY`）。
     pub fn increment(&self, key: &str, delta: i64) -> Result<i64> {
         let rs = if delta == 1 {
-            self.execute(&[b"INCR", key.as_bytes()])?
+            self.execute_on_key(key, true, &[b"INCR", key.as_bytes()])?
         } else {
-            self.execute(&[b"INCRBY", key.as_bytes(), delta.to_string().as_bytes()])?
+            self.execute_on_key(key, true, &[b"INCRBY", key.as_bytes(), delta.to_string().as_bytes()])?
         };
         Ok(rs.as_i64().unwrap_or(0))
     }
 
     /// 浮点自增（`INCRBYFLOAT`）。
     pub fn increment_float(&self, key: &str, delta: f64) -> Result<f64> {
-        let rs = self.execute(&[
+        let rs = self.execute_on_key(key, true, &[
             b"INCRBYFLOAT",
             key.as_bytes(),
             crate::encoder::format_f64(delta).as_bytes(),
@@ -642,9 +1240,9 @@ impl Redis {
     /// 自减（`DECR` / `DECRBY`）。
     pub fn decrement(&self, key: &str, delta: i64) -> Result<i64> {
         let rs = if delta == 1 {
-            self.execute(&[b"DECR", key.as_bytes()])?
+            self.execute_on_key(key, true, &[b"DECR", key.as_bytes()])?
         } else {
-            self.execute(&[b"DECRBY", key.as_bytes(), delta.to_string().as_bytes()])?
+            self.execute_on_key(key, true, &[b"DECRBY", key.as_bytes(), delta.to_string().as_bytes()])?
         };
         Ok(rs.as_i64().unwrap_or(0))
     }
@@ -652,7 +1250,7 @@ impl Redis {
     /// 位设置（`SETBIT`）。
     pub fn set_bit(&self, key: &str, offset: u64, value: u8) -> Result<i64> {
         Ok(self
-            .execute(&[
+            .execute_on_key(key, true, &[
                 b"SETBIT",
                 key.as_bytes(),
                 offset.to_string().as_bytes(),
@@ -665,7 +1263,7 @@ impl Redis {
     /// 位读取（`GETBIT`）。
     pub fn get_bit(&self, key: &str, offset: u64) -> Result<i64> {
         Ok(self
-            .execute(&[b"GETBIT", key.as_bytes(), offset.to_string().as_bytes()])?
+            .execute_on_key(key, false, &[b"GETBIT", key.as_bytes(), offset.to_string().as_bytes()])?
             .as_i64()
             .unwrap_or(0))
     }
@@ -673,7 +1271,7 @@ impl Redis {
     /// 统计置位数量（`BITCOUNT`）。
     pub fn bit_count(&self, key: &str, start: i64, end: i64) -> Result<i64> {
         Ok(self
-            .execute(&[
+            .execute_on_key(key, false, &[
                 b"BITCOUNT",
                 key.as_bytes(),
                 start.to_string().as_bytes(),
@@ -686,7 +1284,7 @@ impl Redis {
     /// 查找首个置位/清零位（`BITPOS`）。
     pub fn bit_pos(&self, key: &str, bit: i32, start: i64, end: i64) -> Result<i64> {
         Ok(self
-            .execute(&[
+            .execute_on_key(key, false, &[
                 b"BITPOS",
                 key.as_bytes(),
                 bit.to_string().as_bytes(),
@@ -715,6 +1313,30 @@ impl Redis {
     pub fn get_all_raw(&self, keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let Some(groups) = self.route_key_groups(keys, false)? {
+            let mut results = vec![None; keys.len()];
+            for (endpoint, entries) in groups {
+                let mut args: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                args.push(b"MGET");
+                for (_, key) in &entries {
+                    args.push(key.as_bytes());
+                }
+
+                let items = self
+                    .execute_on_endpoint(&endpoint, &args, None, false)?
+                    .into_array()
+                    .ok_or_else(|| Error::Protocol("MGET 返回结构非法".into()))?;
+                if items.len() != entries.len() {
+                    return Err(Error::Protocol("MGET 返回数量与请求键数量不一致".into()));
+                }
+
+                for ((index, _), value) in entries.iter().zip(items) {
+                    results[*index] = if value.is_null() { None } else { value.as_bytes() };
+                }
+            }
+            return Ok(results);
         }
 
         let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
@@ -764,6 +1386,14 @@ impl Redis {
 
         // 少量数据直接逐个写入（C# 对 <=2 项做同样优化）
         if values.len() <= 2 {
+            for (k, v) in values {
+                self.set(k.as_ref(), v, expire)?;
+            }
+            return Ok(());
+        }
+
+        self.ensure_topology()?;
+        if self.topology().is_some() {
             for (k, v) in values {
                 self.set(k.as_ref(), v, expire)?;
             }
@@ -917,7 +1547,11 @@ impl Redis {
         }
 
         let refs: Vec<&[u8]> = argv.iter().map(|a| a.as_slice()).collect();
-        self.execute(&refs)
+        if let Some(key) = keys.first() {
+            self.execute_on_key(key, true, &refs)
+        } else {
+            self.execute(&refs)
+        }
     }
 
     /// 执行脚本并解码结果。
@@ -1102,6 +1736,132 @@ pub fn detect_server_type(info: &HashMap<String, String>) -> ServerType {
     ServerType::Redis
 }
 
+fn detect_topology_mode_from_info(
+    info: &HashMap<String, String>,
+    configured_servers: usize,
+) -> Option<ServerMode> {
+    if let Some(mode) = info.get("redis_mode")
+        && mode.eq_ignore_ascii_case("cluster")
+    {
+        return Some(ServerMode::Cluster);
+    }
+    if info.contains_key("sentinel_masters") {
+        return Some(ServerMode::Sentinel);
+    }
+    if info.contains_key("role")
+        && configured_servers > 1
+        && info
+            .get("redis_mode")
+            .map(|mode| mode.eq_ignore_ascii_case("standalone"))
+            .unwrap_or(true)
+    {
+        return Some(ServerMode::Replication);
+    }
+    None
+}
+
+fn parse_replication_discovery(info: &HashMap<String, String>) -> ReplicationDiscovery {
+    let mut result = ReplicationDiscovery {
+        role: info.get("role").cloned(),
+        master_endpoint: None,
+        slaves: Vec::new(),
+        masters: Vec::new(),
+    };
+
+    if let (Some(host), Some(port)) = (info.get("master_host"), info.get("master_port"))
+        && !host.is_empty()
+        && let Ok(port) = port.parse::<u16>()
+    {
+        result.master_endpoint = Some(format!("{host}:{port}"));
+    }
+
+    if let Some(count) = info.get("connected_slaves").and_then(|v| v.parse::<usize>().ok()) {
+        for index in 0..count {
+            if let Some(text) = info.get(&format!("slave{index}"))
+                && let Some(slave) = parse_slave_info(text)
+            {
+                result.slaves.push(slave);
+            }
+        }
+    }
+
+    if let Some(count) = info.get("sentinel_masters").and_then(|v| v.parse::<usize>().ok()) {
+        for index in 0..count {
+            if let Some(text) = info.get(&format!("master{index}"))
+                && let Some(master) = parse_master_info(text)
+            {
+                result.masters.push(master);
+            }
+        }
+    }
+
+    result
+}
+
+fn parse_kv_csv(text: &str) -> HashMap<String, String> {
+    let mut dic = HashMap::new();
+    for part in text.split(',') {
+        let part = part.trim();
+        if let Some((key, value)) = part.split_once('=') {
+            dic.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    dic
+}
+
+fn parse_slave_info(text: &str) -> Option<DiscoveredSlave> {
+    let dic = parse_kv_csv(text);
+    let host = dic.get("ip")?;
+    let port = dic.get("port")?.parse::<u16>().ok()?;
+    let state = dic.get("state").map(|v| v.as_str()).unwrap_or("online");
+    Some(DiscoveredSlave {
+        endpoint: format!("{host}:{port}"),
+        link_up: !state.eq_ignore_ascii_case("offline"),
+    })
+}
+
+fn parse_master_info(text: &str) -> Option<DiscoveredMaster> {
+    let dic = parse_kv_csv(text);
+    let endpoint = dic.get("address")?.to_string();
+    Some(DiscoveredMaster {
+        name: dic.get("name").cloned(),
+        endpoint,
+        status: dic.get("status").cloned(),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectKind {
+    Moved,
+    Ask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Redirect<'a> {
+    kind: RedirectKind,
+    slot: u16,
+    endpoint: &'a str,
+}
+
+fn parse_redirect(message: &str) -> Option<Redirect<'_>> {
+    let mut parts = message.split_whitespace();
+    let kind = parts.next()?;
+    let kind = if kind.eq_ignore_ascii_case("MOVED") {
+        RedirectKind::Moved
+    } else if kind.eq_ignore_ascii_case("ASK") {
+        RedirectKind::Ask
+    } else {
+        return None;
+    };
+    let slot = parts.next()?.parse().ok()?;
+    let endpoint = parts.next()?;
+    Some(Redirect {
+        kind,
+        slot,
+        endpoint,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1120,5 +1880,51 @@ mod tests {
         assert_eq!(rds.options().db, 3);
         assert_eq!(rds.server(), "127.0.0.1:6379");
         assert_eq!(rds.stats(), (0, 0));
+    }
+
+    #[test]
+    fn parse_redirect_parses_moved_and_ask() {
+        let moved = parse_redirect("MOVED 3999 127.0.0.1:7002").unwrap();
+        assert_eq!(moved.kind, RedirectKind::Moved);
+        assert_eq!(moved.slot, 3999);
+        assert_eq!(moved.endpoint, "127.0.0.1:7002");
+
+        let ask = parse_redirect("ASK 12000 10.0.0.2:6379").unwrap();
+        assert_eq!(ask.kind, RedirectKind::Ask);
+        assert_eq!(ask.slot, 12000);
+        assert_eq!(ask.endpoint, "10.0.0.2:6379");
+        assert_eq!(parse_redirect("ERR something"), None);
+    }
+
+    #[test]
+    fn detect_topology_mode_from_info_distinguishes_cluster_replication_and_sentinel() {
+        let cluster = parse_info("redis_mode:cluster\r\n");
+        assert_eq!(detect_topology_mode_from_info(&cluster, 1), Some(ServerMode::Cluster));
+
+        let repl = parse_info("redis_mode:standalone\r\nrole:master\r\nconnected_slaves:1\r\n");
+        assert_eq!(detect_topology_mode_from_info(&repl, 2), Some(ServerMode::Replication));
+
+        let sentinel = parse_info("sentinel_masters:1\r\nmaster0:name=m,status=ok,address=127.0.0.1:6379\r\n");
+        assert_eq!(detect_topology_mode_from_info(&sentinel, 1), Some(ServerMode::Sentinel));
+    }
+
+    #[test]
+    fn parse_replication_discovery_extracts_master_slave_and_sentinel_nodes() {
+        let repl = parse_info(
+            "role:slave\r\nmaster_host:127.0.0.1\r\nmaster_port:6379\r\nconnected_slaves:2\r\nslave0:ip=127.0.0.1,port=6380,state=online\r\nslave1:ip=127.0.0.1,port=6381,state=offline\r\n",
+        );
+        let parsed = parse_replication_discovery(&repl);
+        assert_eq!(parsed.master_endpoint.as_deref(), Some("127.0.0.1:6379"));
+        assert_eq!(parsed.slaves.len(), 2);
+        assert!(parsed.slaves[0].link_up);
+        assert!(!parsed.slaves[1].link_up);
+
+        let sentinel = parse_info(
+            "sentinel_masters:1\r\nmaster0:name=redis-master,status=ok,address=127.0.0.1:6379,slaves=2,sentinels=3\r\n",
+        );
+        let parsed = parse_replication_discovery(&sentinel);
+        assert_eq!(parsed.masters.len(), 1);
+        assert_eq!(parsed.masters[0].name.as_deref(), Some("redis-master"));
+        assert_eq!(parsed.masters[0].endpoint, "127.0.0.1:6379");
     }
 }

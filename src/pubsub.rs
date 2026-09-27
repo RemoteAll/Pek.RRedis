@@ -17,6 +17,7 @@ use crate::resp::RespValue;
 use crate::util::int_or;
 
 /// 发布订阅对象。构造时传入的频道名会自动应用前缀。
+#[derive(Clone)]
 pub struct PubSub {
     redis: FullRedis,
     /// 完整键（含前缀），C# `Publish` 使用该键

@@ -94,7 +94,9 @@
 //! # }
 //! ```
 
+pub mod async_api;
 pub mod client;
+pub mod cluster;
 pub mod encoder;
 mod error;
 pub mod full;
@@ -118,12 +120,21 @@ pub(crate) mod util;
 pub use encoder::{FromRedisPayload, Json, ToRedisPayload};
 pub use error::{Error, Result};
 pub use full::{FullRedis, LockHandle, SlowLogEntry};
-pub use options::{RedisOptions, RedisPoolConfig};
+pub use options::{RedisOptions, RedisPoolConfig, ServerMode};
 pub use redis::{Pipeline, Redis, ServerType};
 pub use resp::RespValue;
 pub use services::{acquire_red_lock, RedLock};
+pub use async_api::{
+    AsyncFullRedis, AsyncHyperLogLog, AsyncRedis, AsyncRedisDelayQueue, AsyncRedisGeo,
+    AsyncRedisHash, AsyncRedisList, AsyncRedisQueue, AsyncRedisReliableQueue,
+    AsyncRedisSet, AsyncRedisSortedSet, AsyncRedisStack, AsyncRedisStream, AsyncPubSub,
+};
 
 // 常用类型直达
+pub use cluster::{
+    ClusterNode, RedisClusterTopology, SlotRange, StaticTopology, Topology, extract_hash_tag,
+    hash_slot,
+};
 pub use geo::{GeoMember, RedisGeo};
 pub use hash::RedisHash;
 pub use hyperloglog::HyperLogLog;

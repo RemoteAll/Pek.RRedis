@@ -7,9 +7,10 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,6 +20,8 @@ use pek_rredis::FullRedis;
 use pek_rredis::resp::{Decoder, RespValue};
 
 type Bytes = Vec<u8>;
+
+static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Default, Clone, Debug)]
 enum Value {
@@ -101,6 +104,14 @@ pub struct MockSlowlogEntry {
 #[derive(Default)]
 pub struct Store {
     data: HashMap<Bytes, Entry>,
+    redirects: HashMap<Bytes, Bytes>,
+    ask_required: HashSet<Bytes>,
+    allow_asking_once: bool,
+    info_mode: Option<String>,
+    info_text: Option<String>,
+    info_replication: Option<String>,
+    info_sentinel: Option<String>,
+    cluster_nodes: Option<String>,
     /// 已加载函数库名（`FUNCTION LOAD/LIST/DELETE`）
     functions: Vec<String>,
     /// 慢日志（`SLOWLOG`）
@@ -111,6 +122,23 @@ pub struct Store {
     ex_versions: HashMap<Bytes, i64>,
     /// TairHash 字段版本号（`EXHSET`）
     ex_field_versions: HashMap<(Bytes, Bytes), i64>,
+    /// Pub/Sub 连接与订阅注册表。
+    pubsub: PubSubRegistry,
+}
+
+#[derive(Default)]
+struct PubSubRegistry {
+    connections: HashMap<u64, Sender<Bytes>>,
+    channels: HashMap<Bytes, HashSet<u64>>,
+    patterns: HashMap<Bytes, HashSet<u64>>,
+    shards: HashMap<Bytes, HashSet<u64>>,
+}
+
+#[derive(Default)]
+struct ConnectionSubscriptions {
+    channels: HashSet<Bytes>,
+    patterns: HashSet<Bytes>,
+    shards: HashSet<Bytes>,
 }
 
 impl Store {
@@ -216,17 +244,35 @@ pub fn mock_full() -> (MockRedis, FullRedis) {
 }
 
 fn handle_conn(stream: TcpStream, store: Arc<Mutex<Store>>) -> std::io::Result<()> {
+    let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst);
+    let (pubsub_tx, pubsub_rx) = mpsc::channel::<Bytes>();
+    {
+        let mut locked = store.lock().unwrap();
+        locked.pubsub.connections.insert(conn_id, pubsub_tx);
+    }
+
     stream.set_nodelay(true).ok();
     // Windows 上 accept 返回的套接字会继承监听套接字的非阻塞属性，这里显式改回阻塞
     stream.set_nonblocking(false).ok();
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
     let mut writer = stream.try_clone()?;
     let mut decoder = Decoder::new(std::io::BufReader::new(stream));
+    let mut subscriptions = ConnectionSubscriptions::default();
 
     loop {
+        drain_pubsub_messages(&mut writer, &pubsub_rx)?;
+
         let value = match decoder.read_value() {
             Ok(v) => v,
-            Err(_) => return Ok(()),
+            Err(pek_rredis::Error::Io(io))
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => continue,
+            Err(_) => {
+                cleanup_connection(&store, conn_id, &mut subscriptions);
+                return Ok(());
+            }
         };
 
         let args: Vec<Bytes> = match value {
@@ -240,13 +286,23 @@ fn handle_conn(stream: TcpStream, store: Arc<Mutex<Store>>) -> std::io::Result<(
             continue;
         }
 
-        let (reply, quit) = dispatch(&store, &args);
-        writer.write_all(&reply)?;
-        writer.flush()?;
+        let (reply, quit) = dispatch(&store, conn_id, &mut subscriptions, &args);
+        if !reply.is_empty() {
+            writer.write_all(&reply)?;
+            writer.flush()?;
+        }
         if quit {
+            cleanup_connection(&store, conn_id, &mut subscriptions);
             return Ok(());
         }
     }
+}
+
+fn default_info(store: &Store) -> String {
+    format!(
+        "# Server\r\nredis_version:7.4.0\r\nredis_mode:{}\r\nos:Windows\r\n# Clients\r\nconnected_clients:1\r\n# Memory\r\nused_memory:1024\r\nused_memory_rss:2048\r\n# Stats\r\ntotal_commands_processed:7\r\n# Replication\r\nrole:master\r\nconnected_slaves:0\r\n# Keyspace\r\ndb0:keys=1,expires=0\r\n",
+        store.info_mode.as_deref().unwrap_or("standalone")
+    )
 }
 
 // ==================== 应答编码 ====================
@@ -300,9 +356,36 @@ fn not_float() -> Bytes {
 
 // ==================== 命令分发 ====================
 
-fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
+fn dispatch(
+    store: &Arc<Mutex<Store>>,
+    connection_id: u64,
+    subscriptions: &mut ConnectionSubscriptions,
+    args: &[Bytes],
+) -> (Bytes, bool) {
     let cmd = String::from_utf8_lossy(&args[0]).to_uppercase();
     let mut store = store.lock().unwrap();
+
+    if cmd == "ASKING" {
+        store.allow_asking_once = true;
+        return (ok(), false);
+    }
+
+    if let Some(key) = args.get(1) {
+        if let Some(reply) = store.redirects.remove(key) {
+            return (reply, false);
+        }
+
+        if store.ask_required.contains(key) {
+            if !store.allow_asking_once {
+                return (error("ERR ASKING required"), false);
+            }
+            store.allow_asking_once = false;
+        } else if store.allow_asking_once {
+            store.allow_asking_once = false;
+        }
+    } else if store.allow_asking_once {
+        store.allow_asking_once = false;
+    }
 
     // Stream 命令（XADD / XREAD / XREADGROUP / XACK / XPENDING / XCLAIM / XGROUP / XINFO / XTRIM / XDEL / XLEN / XRANGE）
     if cmd.starts_with('X')
@@ -315,17 +398,94 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
         "QUIT" => (ok(), true),
         "SELECT" | "AUTH" | "CLIENT" => (ok(), false),
         "HELLO" => (error("ERR unknown command 'HELLO'"), false),
-        "INFO" => (
-            bulk(
-                b"# Server\r\nredis_version:7.4.0\r\nredis_mode:standalone\r\nos:Windows\r\n\
-                  # Clients\r\nconnected_clients:1\r\n\
-                  # Memory\r\nused_memory:1024\r\nused_memory_rss:2048\r\n\
-                  # Stats\r\ntotal_commands_processed:7\r\n\
-                  # Replication\r\nconnected_slaves:0\r\n\
-                  # Keyspace\r\ndb0:keys=1,expires=0\r\n",
+        "SUBSCRIBE" => (
+            subscribe_kind(
+                &mut store,
+                connection_id,
+                subscriptions,
+                &args[1..],
+                b"subscribe",
+                SubscriptionKind::Channel,
             ),
             false,
         ),
+        "PSUBSCRIBE" => (
+            subscribe_kind(
+                &mut store,
+                connection_id,
+                subscriptions,
+                &args[1..],
+                b"psubscribe",
+                SubscriptionKind::Pattern,
+            ),
+            false,
+        ),
+        "SSUBSCRIBE" => (
+            subscribe_kind(
+                &mut store,
+                connection_id,
+                subscriptions,
+                &args[1..],
+                b"ssubscribe",
+                SubscriptionKind::Shard,
+            ),
+            false,
+        ),
+        "UNSUBSCRIBE" => (
+            unsubscribe_kind(
+                &mut store,
+                connection_id,
+                subscriptions,
+                &args[1..],
+                b"unsubscribe",
+                SubscriptionKind::Channel,
+            ),
+            false,
+        ),
+        "PUNSUBSCRIBE" => (
+            unsubscribe_kind(
+                &mut store,
+                connection_id,
+                subscriptions,
+                &args[1..],
+                b"punsubscribe",
+                SubscriptionKind::Pattern,
+            ),
+            false,
+        ),
+        "SUNSUBSCRIBE" => (
+            unsubscribe_kind(
+                &mut store,
+                connection_id,
+                subscriptions,
+                &args[1..],
+                b"sunsubscribe",
+                SubscriptionKind::Shard,
+            ),
+            false,
+        ),
+        "PUBLISH" => (dispatch_publish(&mut store, &args[1], &args[2], false), false),
+        "SPUBLISH" => (dispatch_publish(&mut store, &args[1], &args[2], true), false),
+        "INFO" => {
+            let section = args.get(1).map(|arg| String::from_utf8_lossy(arg).to_ascii_lowercase());
+            let text = match section.as_deref() {
+                Some("replication") => store.info_replication.clone().unwrap_or_else(|| default_info(&store)),
+                Some("sentinel") => store.info_sentinel.clone().unwrap_or_else(|| default_info(&store)),
+                _ => store.info_text.clone().unwrap_or_else(|| default_info(&store)),
+            };
+            (bulk(text.as_bytes()), false)
+        }
+        "CLUSTER" => {
+            if args.len() >= 2 && args[1].eq_ignore_ascii_case(b"NODES") {
+                match &store.cluster_nodes {
+                    Some(nodes) => (bulk(nodes.as_bytes()), false),
+                    None => (error("ERR CLUSTER NODES not configured"), false),
+                }
+            } else {
+                (error("ERR unknown CLUSTER subcommand"), false)
+            }
+        }
+        "PUBSUB" => dispatch_pubsub_introspection(&mut store, args),
         "DBSIZE" => (int(store.data.len() as i64), false),
         "FLUSHDB" => {
             store.data.clear();
@@ -337,6 +497,15 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
             let mut n = 0;
             for key in &args[1..] {
                 if store.remove(key) {
+                    n += 1;
+                }
+            }
+            (int(n), false)
+        }
+        "TOUCH" => {
+            let mut n = 0;
+            for key in &args[1..] {
+                if store.get_live(key).is_some() {
                     n += 1;
                 }
             }
@@ -428,6 +597,26 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
                 .map(|(k, _)| k.clone())
                 .collect();
             (array(vec![bulk(b"0"), array(keys.iter().map(|k| bulk(k)).collect())]), false)
+        }
+        "RENAME" | "RENAMENX" => {
+            let source = args[1].clone();
+            let destination = args[2].clone();
+            let Some(entry) = store.get_live(&source).cloned() else {
+                return (error("ERR no such key"), false);
+            };
+
+            if cmd == "RENAMENX" && store.get_live(&destination).is_some() {
+                return (int(0), false);
+            }
+
+            store.data.insert(destination, entry);
+            store.data.remove(&source);
+
+            if cmd == "RENAMENX" {
+                (int(1), false)
+            } else {
+                (ok(), false)
+            }
         }
         "COPY" => {
             let source = args[1].clone();
@@ -2291,6 +2480,300 @@ fn dispatch(store: &Arc<Mutex<Store>>, args: &[Bytes]) -> (Bytes, bool) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SubscriptionKind {
+    Channel,
+    Pattern,
+    Shard,
+}
+
+fn drain_pubsub_messages(writer: &mut TcpStream, receiver: &Receiver<Bytes>) -> std::io::Result<()> {
+    loop {
+        match receiver.try_recv() {
+            Ok(message) => {
+                writer.write_all(&message)?;
+                writer.flush()?;
+            }
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+fn cleanup_connection(
+    store: &Arc<Mutex<Store>>,
+    connection_id: u64,
+    subscriptions: &mut ConnectionSubscriptions,
+) {
+    let mut store = store.lock().unwrap();
+    for channel in subscriptions.channels.drain() {
+        remove_subscriber(&mut store.pubsub.channels, &channel, connection_id);
+    }
+    for pattern in subscriptions.patterns.drain() {
+        remove_subscriber(&mut store.pubsub.patterns, &pattern, connection_id);
+    }
+    for shard in subscriptions.shards.drain() {
+        remove_subscriber(&mut store.pubsub.shards, &shard, connection_id);
+    }
+    store.pubsub.connections.remove(&connection_id);
+}
+
+fn subscribe_kind(
+    store: &mut Store,
+    connection_id: u64,
+    subscriptions: &mut ConnectionSubscriptions,
+    entries: &[Bytes],
+    action: &[u8],
+    kind: SubscriptionKind,
+) -> Bytes {
+    let mut replies = Vec::new();
+    for entry in entries {
+        add_subscription(store, connection_id, subscriptions, entry.clone(), kind);
+        replies.push(array(vec![
+            bulk(action),
+            bulk(entry),
+            int(total_subscriptions(subscriptions) as i64),
+        ]));
+    }
+    concat_replies(replies)
+}
+
+fn unsubscribe_kind(
+    store: &mut Store,
+    connection_id: u64,
+    subscriptions: &mut ConnectionSubscriptions,
+    entries: &[Bytes],
+    action: &[u8],
+    kind: SubscriptionKind,
+) -> Bytes {
+    let targets: Vec<Bytes> = if entries.is_empty() {
+        subscription_bucket(subscriptions, kind).iter().cloned().collect()
+    } else {
+        entries.to_vec()
+    };
+
+    if targets.is_empty() {
+        return array(vec![bulk(action), nil(), int(total_subscriptions(subscriptions) as i64)]);
+    }
+
+    let mut replies = Vec::new();
+    for target in targets {
+        remove_subscription(store, connection_id, subscriptions, &target, kind);
+        replies.push(array(vec![
+            bulk(action),
+            bulk(&target),
+            int(total_subscriptions(subscriptions) as i64),
+        ]));
+    }
+    concat_replies(replies)
+}
+
+fn dispatch_publish(store: &mut Store, channel: &[u8], message: &[u8], shard: bool) -> Bytes {
+    let payload = if shard {
+        array(vec![bulk(b"smessage"), bulk(channel), bulk(message)])
+    } else {
+        array(vec![bulk(b"message"), bulk(channel), bulk(message)])
+    };
+
+    let mut delivered = 0i64;
+    let mut stale = Vec::new();
+
+    if shard {
+        if let Some(subscribers) = store.pubsub.shards.get(channel).cloned() {
+            for connection_id in subscribers {
+                if send_pubsub_message(&store.pubsub.connections, connection_id, payload.clone()) {
+                    delivered += 1;
+                } else {
+                    stale.push((connection_id, SubscriptionKind::Shard, channel.to_vec()));
+                }
+            }
+        }
+    } else {
+        if let Some(subscribers) = store.pubsub.channels.get(channel).cloned() {
+            for connection_id in subscribers {
+                if send_pubsub_message(&store.pubsub.connections, connection_id, payload.clone()) {
+                    delivered += 1;
+                } else {
+                    stale.push((connection_id, SubscriptionKind::Channel, channel.to_vec()));
+                }
+            }
+        }
+
+        for (pattern, subscribers) in store.pubsub.patterns.clone() {
+            if !glob_match(&pattern, channel) {
+                continue;
+            }
+            let pattern_payload = array(vec![
+                bulk(b"pmessage"),
+                bulk(&pattern),
+                bulk(channel),
+                bulk(message),
+            ]);
+            for connection_id in subscribers {
+                if send_pubsub_message(&store.pubsub.connections, connection_id, pattern_payload.clone()) {
+                    delivered += 1;
+                } else {
+                    stale.push((connection_id, SubscriptionKind::Pattern, pattern.clone()));
+                }
+            }
+        }
+    }
+
+    for (connection_id, kind, entry) in stale {
+        match kind {
+            SubscriptionKind::Channel => remove_subscriber(&mut store.pubsub.channels, &entry, connection_id),
+            SubscriptionKind::Pattern => remove_subscriber(&mut store.pubsub.patterns, &entry, connection_id),
+            SubscriptionKind::Shard => remove_subscriber(&mut store.pubsub.shards, &entry, connection_id),
+        }
+        store.pubsub.connections.remove(&connection_id);
+    }
+
+    int(delivered)
+}
+
+fn dispatch_pubsub_introspection(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
+    let Some(subcommand) = args.get(1).map(|arg| String::from_utf8_lossy(arg).to_uppercase()) else {
+        return (error("ERR unknown PUBSUB subcommand"), false);
+    };
+
+    match subcommand.as_str() {
+        "CHANNELS" => {
+            let pattern = args.get(2).cloned();
+            let mut channels: Vec<Bytes> = store
+                .pubsub
+                .channels
+                .iter()
+                .filter(|(_, subscribers)| !subscribers.is_empty())
+                .map(|(channel, _)| channel.clone())
+                .collect();
+            if let Some(pattern) = pattern {
+                channels.retain(|channel| glob_match(&pattern, channel));
+            }
+            channels.sort();
+            (array(channels.iter().map(|channel| bulk(channel)).collect()), false)
+        }
+        "NUMSUB" => {
+            let mut items = Vec::new();
+            for channel in &args[2..] {
+                let count = store
+                    .pubsub
+                    .channels
+                    .get(channel)
+                    .map(|subscribers| subscribers.len() as i64)
+                    .unwrap_or(0);
+                items.push(bulk(channel));
+                items.push(int(count));
+            }
+            (array(items), false)
+        }
+        "NUMPAT" => {
+            let count: usize = store.pubsub.patterns.values().map(|subscribers| subscribers.len()).sum();
+            (int(count as i64), false)
+        }
+        _ => (error("ERR unknown PUBSUB subcommand"), false),
+    }
+}
+
+fn add_subscription(
+    store: &mut Store,
+    connection_id: u64,
+    subscriptions: &mut ConnectionSubscriptions,
+    entry: Bytes,
+    kind: SubscriptionKind,
+) {
+    match kind {
+        SubscriptionKind::Channel => {
+            if subscriptions.channels.insert(entry.clone()) {
+                store.pubsub.channels.entry(entry).or_default().insert(connection_id);
+            }
+        }
+        SubscriptionKind::Pattern => {
+            if subscriptions.patterns.insert(entry.clone()) {
+                store.pubsub.patterns.entry(entry).or_default().insert(connection_id);
+            }
+        }
+        SubscriptionKind::Shard => {
+            if subscriptions.shards.insert(entry.clone()) {
+                store.pubsub.shards.entry(entry).or_default().insert(connection_id);
+            }
+        }
+    }
+}
+
+fn remove_subscription(
+    store: &mut Store,
+    connection_id: u64,
+    subscriptions: &mut ConnectionSubscriptions,
+    entry: &[u8],
+    kind: SubscriptionKind,
+) {
+    match kind {
+        SubscriptionKind::Channel => {
+            subscriptions.channels.remove(entry);
+            remove_subscriber(&mut store.pubsub.channels, entry, connection_id);
+        }
+        SubscriptionKind::Pattern => {
+            subscriptions.patterns.remove(entry);
+            remove_subscriber(&mut store.pubsub.patterns, entry, connection_id);
+        }
+        SubscriptionKind::Shard => {
+            subscriptions.shards.remove(entry);
+            remove_subscriber(&mut store.pubsub.shards, entry, connection_id);
+        }
+    }
+}
+
+fn remove_subscriber(
+    registry: &mut HashMap<Bytes, HashSet<u64>>,
+    entry: &[u8],
+    connection_id: u64,
+) {
+    let should_remove = match registry.get_mut(entry) {
+        Some(subscribers) => {
+            subscribers.remove(&connection_id);
+            subscribers.is_empty()
+        }
+        None => false,
+    };
+    if should_remove {
+        registry.remove(entry);
+    }
+}
+
+fn subscription_bucket(
+    subscriptions: &ConnectionSubscriptions,
+    kind: SubscriptionKind,
+) -> &HashSet<Bytes> {
+    match kind {
+        SubscriptionKind::Channel => &subscriptions.channels,
+        SubscriptionKind::Pattern => &subscriptions.patterns,
+        SubscriptionKind::Shard => &subscriptions.shards,
+    }
+}
+
+fn total_subscriptions(subscriptions: &ConnectionSubscriptions) -> usize {
+    subscriptions.channels.len() + subscriptions.patterns.len() + subscriptions.shards.len()
+}
+
+fn send_pubsub_message(
+    connections: &HashMap<u64, Sender<Bytes>>,
+    connection_id: u64,
+    payload: Bytes,
+) -> bool {
+    connections
+        .get(&connection_id)
+        .map(|sender| sender.send(payload).is_ok())
+        .unwrap_or(false)
+}
+
+fn concat_replies(replies: Vec<Bytes>) -> Bytes {
+    let mut out = Vec::new();
+    for reply in replies {
+        out.extend_from_slice(&reply);
+    }
+    out
+}
+
 fn dispatch_set(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
     let key = &args[1];
     let value = &args[2];
@@ -3240,6 +3723,50 @@ pub fn set_raw(server: &MockRedis, key: &str, value: &str, ttl_seconds: i64) {
         && let Some(e) = store.get_live(key.as_bytes()) {
             e.expire_at = Some(Instant::now() + Duration::from_secs(ttl_seconds as u64));
         }
+}
+
+/// 对指定 key 预置一次性重定向错误（如 `MOVED ...` / `ASK ...`）。
+pub fn redirect_once(server: &MockRedis, key: &str, message: &str) {
+    let mut store = server.store.lock().unwrap();
+    store
+        .redirects
+        .insert(key.as_bytes().to_vec(), error(message));
+}
+
+/// 标记指定 key 在目标节点必须先执行 `ASKING` 才允许访问。
+pub fn require_asking(server: &MockRedis, key: &str) {
+    let mut store = server.store.lock().unwrap();
+    store.ask_required.insert(key.as_bytes().to_vec());
+}
+
+/// 设置 INFO 返回的 redis_mode。
+pub fn set_info_mode(server: &MockRedis, mode: &str) {
+    let mut store = server.store.lock().unwrap();
+    store.info_mode = Some(mode.to_string());
+}
+
+/// 设置 `INFO` 默认返回文本。
+pub fn set_info_text(server: &MockRedis, text: &str) {
+    let mut store = server.store.lock().unwrap();
+    store.info_text = Some(text.to_string());
+}
+
+/// 设置 `INFO Replication` 返回文本。
+pub fn set_info_replication(server: &MockRedis, text: &str) {
+    let mut store = server.store.lock().unwrap();
+    store.info_replication = Some(text.to_string());
+}
+
+/// 设置 `INFO Sentinel` 返回文本。
+pub fn set_info_sentinel(server: &MockRedis, text: &str) {
+    let mut store = server.store.lock().unwrap();
+    store.info_sentinel = Some(text.to_string());
+}
+
+/// 设置 `CLUSTER NODES` 返回文本。
+pub fn set_cluster_nodes(server: &MockRedis, nodes: &str) {
+    let mut store = server.store.lock().unwrap();
+    store.cluster_nodes = Some(nodes.to_string());
 }
 
 /// 键是否存在（含类型）。

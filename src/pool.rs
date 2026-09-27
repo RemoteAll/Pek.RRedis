@@ -251,6 +251,9 @@ mod tests {
                 timeout_ms: 200,
                 protocol_version: 0,
                 max_message_size: 1024,
+                tls: false,
+                tls_server_name: None,
+                tls_insecure: false,
             };
             RedisClient::connect(&conn)
         });

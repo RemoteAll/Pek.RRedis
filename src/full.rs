@@ -12,9 +12,11 @@
 //! - **脚本** [`FullRedis::eval`] 与 **子库** [`FullRedis::create_sub`]。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
+use crate::cluster::Topology;
 use crate::error::{Error, Result};
 use crate::options::RedisOptions;
 use crate::redis::{Redis, ServerType};
@@ -72,6 +74,16 @@ impl FullRedis {
     /// 基础客户端。
     pub fn redis(&self) -> &Redis {
         &self.redis
+    }
+
+    /// 设置拓扑选择器。配置后，底层单 key 命令会按 key 路由到目标节点。
+    pub fn set_topology(&self, topology: Arc<dyn Topology>) {
+        self.redis.set_topology(topology);
+    }
+
+    /// 清空拓扑选择器，恢复普通多地址轮询行为。
+    pub fn clear_topology(&self) {
+        self.redis.clear_topology();
     }
 
     /// 键前缀。

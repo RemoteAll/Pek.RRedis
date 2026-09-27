@@ -10,11 +10,45 @@
 //!
 //! 支持的连接字符串键（不区分大小写）：`Server`、`Port`、`UserName`、`Password`、`Db`、
 //! `Timeout`（`responseTimeout` / `connectTimeout`）、`Prefix`、`ProtocolVersion`、
-//! `MaxMessageSize`、`Expire`、`PoolMin`、`PoolMax`、`PoolIdleTime`、`MaxLifetime`、`WaitTimeout`。
+//! `MaxMessageSize`、`Expire`、`PoolMin`、`PoolMax`、`PoolIdleTime`、`MaxLifetime`、`WaitTimeout`、
+//! `Ssl`/`Tls`、`TlsServerName`、`TlsInsecure`，以及集群预留字段：`Mode`、`AutoDetect`、
+//! `TopologyRefreshSeconds`、`ReadFromReplicas`、`SentinelMasterName`。
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use crate::error::{Error, Result};
+
+/// Redis 拓扑模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServerMode {
+    /// 自动探测：后续由 `INFO` / `CLUSTER NODES` 等结果决定。
+    #[default]
+    Auto,
+    /// 单机模式。
+    Standalone,
+    /// Redis Cluster。
+    Cluster,
+    /// Sentinel。
+    Sentinel,
+    /// 主从复制。
+    Replication,
+}
+
+impl FromStr for ServerMode {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "standalone" | "single" => Ok(Self::Standalone),
+            "cluster" => Ok(Self::Cluster),
+            "sentinel" => Ok(Self::Sentinel),
+            "replication" | "masterslave" | "master-slave" | "replica" => Ok(Self::Replication),
+            other => Err(Error::Config(format!("不支持的 Redis Mode：{other}"))),
+        }
+    }
+}
 
 /// 连接池配置。默认值与 DH.NRedis `RedisPoolConfig` 一致。
 #[derive(Debug, Clone)]
@@ -96,6 +130,22 @@ pub struct RedisOptions {
     pub max_message_size: usize,
     /// 连接池配置
     pub pool: RedisPoolConfig,
+    /// 连接拓扑模式。默认自动探测。
+    pub mode: ServerMode,
+    /// 是否允许自动探测集群/哨兵/主从。默认 false，保持现有行为。
+    pub auto_detect: bool,
+    /// 拓扑刷新周期（秒）。默认 60。
+    pub topology_refresh_seconds: u64,
+    /// 读请求是否允许走副本节点。默认 false。
+    pub read_from_replicas: bool,
+    /// Sentinel 模式下的主节点名称。
+    pub sentinel_master_name: Option<String>,
+    /// 是否启用 TLS（也可通过 `rediss://` 自动开启）。
+    pub tls: bool,
+    /// TLS 握手使用的 ServerName/SNI。为空时从 endpoint 自动推导。
+    pub tls_server_name: Option<String>,
+    /// 是否跳过证书校验（仅测试/自签名环境）。
+    pub tls_insecure: bool,
 }
 
 impl Default for RedisOptions {
@@ -113,6 +163,14 @@ impl Default for RedisOptions {
             expire: 0,
             max_message_size: 1024 * 1024,
             pool: RedisPoolConfig::default(),
+            mode: ServerMode::Auto,
+            auto_detect: false,
+            topology_refresh_seconds: 60,
+            read_from_replicas: false,
+            sentinel_master_name: None,
+            tls: false,
+            tls_server_name: None,
+            tls_insecure: false,
         }
     }
 }
@@ -153,6 +211,9 @@ impl RedisOptions {
             let v = v.trim();
             if !v.is_empty() {
                 self.servers = split_servers(v);
+                if self.servers.iter().any(|server| server.trim().starts_with("rediss://")) {
+                    self.tls = true;
+                }
             }
         }
         if self.servers.is_empty() {
@@ -201,6 +262,33 @@ impl RedisOptions {
             && v >= 0 {
                 self.expire = v;
             }
+        if let Some(v) = dic.get("mode") {
+            self.mode = ServerMode::from_str(v)?;
+        }
+        if let Some(v) = get_bool(&dic, &["AutoDetect"]) {
+            self.auto_detect = v;
+        }
+        if let Some(v) = get_int(&dic, &["TopologyRefreshSeconds"])
+            && v >= 0 {
+                self.topology_refresh_seconds = v as u64;
+            }
+        if let Some(v) = get_bool(&dic, &["ReadFromReplicas"]) {
+            self.read_from_replicas = v;
+        }
+        if let Some(v) = dic.get("sentinelmastername")
+            && !v.is_empty() {
+                self.sentinel_master_name = Some(v.clone());
+            }
+        if let Some(v) = get_bool(&dic, &["Ssl", "Tls", "UseTls"]) {
+            self.tls = v;
+        }
+        if let Some(v) = dic.get("tlsservername")
+            && !v.is_empty() {
+                self.tls_server_name = Some(v.clone());
+        }
+        if let Some(v) = get_bool(&dic, &["TlsInsecure", "SslInsecure", "InsecureSkipVerify"]) {
+            self.tls_insecure = v;
+        }
         self.pool.load(&dic);
 
         if self.servers.is_empty() {
@@ -216,7 +304,10 @@ impl RedisOptions {
             .iter()
             .map(|s| {
                 let s = s.trim();
-                let s = s.strip_prefix("tcp://").unwrap_or(s);
+                let s = s
+                    .strip_prefix("tcp://")
+                    .or_else(|| s.strip_prefix("rediss://"))
+                    .unwrap_or(s);
                 if s.contains(':') {
                     s.to_string()
                 } else {
@@ -270,6 +361,21 @@ fn get_int(dic: &BTreeMap<String, String>, keys: &[&str]) -> Option<i64> {
             && let Ok(n) = v.trim().parse::<i64>() {
                 return Some(n);
             }
+    }
+    None
+}
+
+fn get_bool(dic: &BTreeMap<String, String>, keys: &[&str]) -> Option<bool> {
+    for k in keys {
+        if let Some(v) = dic.get(&k.to_lowercase()) {
+            let text = v.trim();
+            if text.eq_ignore_ascii_case("true") || text == "1" || text.eq_ignore_ascii_case("yes") {
+                return Some(true);
+            }
+            if text.eq_ignore_ascii_case("false") || text == "0" || text.eq_ignore_ascii_case("no") {
+                return Some(false);
+            }
+        }
     }
     None
 }
@@ -345,5 +451,38 @@ mod tests {
         assert_eq!(opt.pool.idle_time, 10);
         assert_eq!(opt.pool.max_lifetime, 60);
         assert_eq!(opt.pool.wait_timeout, 5);
+    }
+
+    #[test]
+    fn parse_cluster_mode_options() {
+        let opt = RedisOptions::from_config(
+            "server=10.0.0.1:6379;mode=cluster;autodetect=true;topologyrefreshseconds=15;readfromreplicas=yes;sentinelmastername=mymaster",
+        )
+        .unwrap();
+
+        assert_eq!(opt.mode, ServerMode::Cluster);
+        assert!(opt.auto_detect);
+        assert_eq!(opt.topology_refresh_seconds, 15);
+        assert!(opt.read_from_replicas);
+        assert_eq!(opt.sentinel_master_name.as_deref(), Some("mymaster"));
+    }
+
+    #[test]
+    fn parse_tls_options() {
+        let opt = RedisOptions::from_config(
+            "server=rediss://redis.local:6380;ssl=true;tlsservername=cache.local;tlsinsecure=yes",
+        )
+        .unwrap();
+
+        assert_eq!(opt.endpoints(), vec!["redis.local:6380"]);
+        assert!(opt.tls);
+        assert!(opt.tls_insecure);
+        assert_eq!(opt.tls_server_name.as_deref(), Some("cache.local"));
+    }
+
+    #[test]
+    fn invalid_mode_is_rejected() {
+        let err = RedisOptions::from_config("server=127.0.0.1:6379;mode=weird").unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 }
