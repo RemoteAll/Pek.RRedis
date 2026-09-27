@@ -17,6 +17,74 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 
+fn seed_slowlog_file(server: &support::MockRedis, path: &str) {
+    let text = std::fs::read_to_string(path).expect("read --slowlog-file");
+    for (line_no, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+
+        let mut parts = line.splitn(4, '|');
+        let id: i64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid slowlog id at line {}", line_no + 1));
+        let timestamp: i64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid slowlog timestamp at line {}", line_no + 1));
+        let duration_us: i64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid slowlog duration at line {}", line_no + 1));
+        let command_text = parts
+            .next()
+            .unwrap_or_else(|| panic!("missing slowlog command at line {}", line_no + 1));
+        let command: Vec<&str> = command_text.split_whitespace().collect();
+        assert!(
+            !command.is_empty(),
+            "missing slowlog command tokens at line {}",
+            line_no + 1
+        );
+        support::seed_slowlog(server, id, timestamp, duration_us, &command);
+    }
+}
+
+fn seed_latency_file(server: &support::MockRedis, path: &str) {
+    let text = std::fs::read_to_string(path).expect("read --latency-file");
+    for (line_no, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+
+        let mut parts = line.splitn(4, '|');
+        let event = parts
+            .next()
+            .unwrap_or_else(|| panic!("missing latency event at line {}", line_no + 1));
+        let timestamp: i64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid latency timestamp at line {}", line_no + 1));
+        let latest: i64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid latency latest at line {}", line_no + 1));
+        let max: i64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid latency max at line {}", line_no + 1));
+        support::seed_latency(server, event, timestamp, latest, max);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get_opt = |name: &str| {
@@ -52,6 +120,12 @@ fn main() {
     if let Some(path) = get_opt("--cluster-nodes-file") {
         let text = std::fs::read_to_string(path).expect("read --cluster-nodes-file");
         support::set_cluster_nodes(&server, &text);
+    }
+    if let Some(path) = get_opt("--slowlog-file") {
+        seed_slowlog_file(&server, &path);
+    }
+    if let Some(path) = get_opt("--latency-file") {
+        seed_latency_file(&server, &path);
     }
 
     println!("[mock_redis] 已启动：{}（RESP2 子集实现，按 Enter 退出）", server.addr);

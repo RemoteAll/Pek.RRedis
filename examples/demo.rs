@@ -14,7 +14,10 @@
 //! stream-status  ：查看流长度 / 消费组 / 挂起 / 消费者
 //! pubsub-publish / pubsub-subscribe ：跨语言 PubSub（普通/模式/分片）
 //! write-advanced / verify-advanced ：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION 等）
+//! verify-ops / reset-ops / verify-ops-empty ：运维 API 面互通（SLOWLOG/LATENCY）
 //! exists：只读探针，检查某个键是否存在（给严格拓扑联调用）
+//! find-slot-key：离线寻找命中指定 Cluster 槽位范围的 key（给严格 cluster 联调用）
+//! set-key：写入任意单键字符串（给严格拓扑/TLS 联调用）
 //! selftest：离线校验编码器字节格式（无需 Redis）
 //! report  ：查看双方回执
 //! clean   ：清理本 Demo 的键
@@ -46,7 +49,7 @@ use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 use pek_rredis::encoder::Json;
-use pek_rredis::{FromRedisPayload, FullRedis, ToRedisPayload};
+use pek_rredis::{FromRedisPayload, FullRedis, ToRedisPayload, hash_slot};
 
 /// 本侧标识（文件名/进程来源）
 const SIDE: &str = "rust";
@@ -79,9 +82,16 @@ fn run() -> i32 {
         &std::env::var("REDIS_CONFIG").unwrap_or_else(|_| "server=127.0.0.1:6379;db=15".into()),
     );
 
-    // selftest 不需要连接 Redis
+    // 纯离线命令不需要连接 Redis
     if command == "selftest" {
         return selftest();
+    }
+    if command == "find-slot-key" {
+        let from: u16 = opt("--from", "0").parse().unwrap_or(0);
+        let to: u16 = opt("--to", "16383").parse().unwrap_or(16_383);
+        let prefix = opt("--key-prefix", "cluster:key:");
+        let suffix = opt("--key-suffix", "");
+        return find_slot_key(&prefix, &suffix, from, to);
     }
 
     // --mock：使用进程内迷你 Redis，本地即可完整演示（无需安装 Redis）
@@ -189,6 +199,16 @@ fn run() -> i32 {
             0
         }
         "verify-advanced" => ctx.verify_advanced(),
+        "verify-ops" => ctx.verify_ops(),
+        "reset-ops" => ctx.reset_ops(),
+        "verify-ops-empty" => ctx.verify_ops_empty(),
+        "set-key" => {
+            let key = opt("--key", "probe");
+            let value = opt("--value", "value");
+            let expire: i64 = opt("--expire", "0").parse().unwrap_or(0);
+            ctx.set_key(&key, &value, expire);
+            0
+        }
         "exists" => {
             let key = opt("--key", "csharp:marker");
             ctx.exists(&key);
@@ -209,7 +229,7 @@ fn run() -> i32 {
             code
         }
         other => {
-            println!("未知命令：{other}（可用：selftest/write/verify/write-advanced/verify-advanced/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+            println!("未知命令：{other}（可用：selftest/find-slot-key/set-key/write/verify/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
             2
         }
     };
@@ -238,12 +258,35 @@ fn sample_json_time() -> NaiveDateTime {
     NaiveDateTime::parse_from_str("2026-09-26 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap()
 }
 
+fn find_slot_key(prefix: &str, suffix: &str, from: u16, to: u16) -> i32 {
+    for index in 0..200_000u32 {
+        let key = format!("{prefix}{index}{suffix}");
+        let slot = hash_slot(&key);
+        if slot >= from && slot <= to {
+            println!("[find-slot-key] key={key} slot={slot}");
+            return 0;
+        }
+    }
+
+    println!("✘ 未找到命中槽位范围 {from}..={to} 的 key");
+    2
+}
+
 const SAMPLE_STRING: &str = "Hello 互通";
 const SAMPLE_INT: i32 = 123456789;
 const SAMPLE_COUNT: i32 = 7;
 const SAMPLE_NAME: &str = "互通Demo";
 const ADV_FUNCTION_LIBRARY: &str =
     "#!lua name=advlib\nredis.register_function('echo', function(keys, args) return args[1] end)\n";
+const OPS_SLOWLOG_ID: i64 = 101;
+const OPS_SLOWLOG_TIMESTAMP: i64 = 1_727_424_000;
+const OPS_SLOWLOG_DURATION_US: i64 = 12_345;
+const OPS_SLOWLOG_COMMAND: [&str; 3] = ["SET", "ops:key", "42"];
+const OPS_LATENCY_EVENT: &str = "command";
+const OPS_LATENCY_TIMESTAMP: i64 = 1_727_424_001;
+const OPS_LATENCY_LATEST_MS: i64 = 15;
+const OPS_LATENCY_MAX_MS: i64 = 42;
+const OPS_DOCTOR_TEXT: &str = "latency spikes";
 
 /// 固定样本模型（与 C# `DemoModel` 字段一致，属性名 PascalCase）
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -781,6 +824,151 @@ impl DemoCtx {
         if self.failures.is_empty() { 0 } else { 1 }
     }
 
+    fn verify_ops(&mut self) -> i32 {
+        println!("[verify-ops/{SIDE}] 校验运维 API 面（SLOWLOG/LATENCY）");
+
+        let slowlog_len = self.rds.slowlog_len().unwrap_or_default();
+        self.check(
+            slowlog_len == 1,
+            "SLOWLOG LEN == 1",
+            Some(slowlog_len.to_string()),
+        );
+
+        let slowlog = self.rds.slowlog_get(10).unwrap_or_default();
+        let entry = slowlog.first().cloned();
+        self.check(
+            entry.is_some(),
+            "SLOWLOG GET 返回条目",
+            Some(format!("count={}", slowlog.len())),
+        );
+        if let Some(entry) = entry {
+            self.check(
+                entry.id == OPS_SLOWLOG_ID,
+                "SLOWLOG id",
+                Some(entry.id.to_string()),
+            );
+            self.check(
+                entry.timestamp == OPS_SLOWLOG_TIMESTAMP,
+                "SLOWLOG timestamp",
+                Some(entry.timestamp.to_string()),
+            );
+            self.check(
+                entry.duration_us == OPS_SLOWLOG_DURATION_US,
+                "SLOWLOG duration_us",
+                Some(entry.duration_us.to_string()),
+            );
+            self.check(
+                entry.command == OPS_SLOWLOG_COMMAND.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "SLOWLOG command",
+                Some(format!("{:?}", entry.command)),
+            );
+        }
+
+        let history = self
+            .rds
+            .latency_history(OPS_LATENCY_EVENT)
+            .unwrap_or_default();
+        self.check(
+            history == vec![(OPS_LATENCY_TIMESTAMP, OPS_LATENCY_LATEST_MS)],
+            "LATENCY HISTORY 命中样本事件",
+            Some(format!("{:?}", history)),
+        );
+
+        let latest = self.rds.latency_latest().unwrap_or_default();
+        self.check(
+            latest.iter().any(|(event, ts, latest_ms, max_ms)| {
+                event == OPS_LATENCY_EVENT
+                    && *ts == OPS_LATENCY_TIMESTAMP
+                    && *latest_ms == OPS_LATENCY_LATEST_MS
+                    && *max_ms == OPS_LATENCY_MAX_MS
+            }),
+            "LATENCY LATEST 包含样本事件",
+            Some(format!("{:?}", latest)),
+        );
+
+        let doctor = self.rds.latency_doctor().unwrap_or_default();
+        self.check(
+            doctor.contains(OPS_DOCTOR_TEXT),
+            "LATENCY DOCTOR 返回诊断文本",
+            Some(doctor),
+        );
+
+        if self.failures.is_empty() { 0 } else { 1 }
+    }
+
+    fn reset_ops(&mut self) -> i32 {
+        println!("[reset-ops/{SIDE}] 重置运维 API 样本（SLOWLOG/LATENCY）");
+
+        let before = self.rds.slowlog_len().unwrap_or_default();
+        self.check(
+            before == 1,
+            "SLOWLOG RESET 前条数 == 1",
+            Some(before.to_string()),
+        );
+        self.rds.slowlog_reset().unwrap();
+        let after = self.rds.slowlog_len().unwrap_or_default();
+        self.check(
+            after == 0,
+            "SLOWLOG RESET 后条数 == 0",
+            Some(after.to_string()),
+        );
+
+        let reset = self.rds.latency_reset(&[OPS_LATENCY_EVENT]).unwrap_or_default();
+        self.check(
+            reset == 1,
+            "LATENCY RESET 清空样本事件",
+            Some(reset.to_string()),
+        );
+        let history = self
+            .rds
+            .latency_history(OPS_LATENCY_EVENT)
+            .unwrap_or_default();
+        self.check(
+            history.is_empty(),
+            "LATENCY HISTORY 已清空",
+            Some(format!("{:?}", history)),
+        );
+
+        if self.failures.is_empty() { 0 } else { 1 }
+    }
+
+    fn verify_ops_empty(&mut self) -> i32 {
+        println!("[verify-ops-empty/{SIDE}] 校验运维 API 样本已被清空");
+
+        let slowlog_len = self.rds.slowlog_len().unwrap_or_default();
+        self.check(
+            slowlog_len == 0,
+            "SLOWLOG LEN == 0",
+            Some(slowlog_len.to_string()),
+        );
+
+        let slowlog = self.rds.slowlog_get(10).unwrap_or_default();
+        self.check(
+            slowlog.is_empty(),
+            "SLOWLOG GET 为空",
+            Some(format!("count={}", slowlog.len())),
+        );
+
+        let history = self
+            .rds
+            .latency_history(OPS_LATENCY_EVENT)
+            .unwrap_or_default();
+        self.check(
+            history.is_empty(),
+            "LATENCY HISTORY 为空",
+            Some(format!("{:?}", history)),
+        );
+
+        let latest = self.rds.latency_latest().unwrap_or_default();
+        self.check(
+            latest.iter().all(|(event, _, _, _)| event != OPS_LATENCY_EVENT),
+            "LATENCY LATEST 不含样本事件",
+            Some(format!("{:?}", latest)),
+        );
+
+        if self.failures.is_empty() { 0 } else { 1 }
+    }
+
     // ---------------- 可靠队列 ----------------
 
     fn push(&mut self, count: usize) {
@@ -890,6 +1078,11 @@ impl DemoCtx {
             value.is_some(),
             value.unwrap_or_default()
         );
+    }
+
+    fn set_key(&mut self, key: &str, value: &str, expire: i64) {
+        self.set(key, value.to_string(), expire).unwrap();
+        println!("[set-key/{SIDE}] key={key} value={value} expire={expire}");
     }
 
     // ---------------- PubSub ----------------

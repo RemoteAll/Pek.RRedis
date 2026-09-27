@@ -10,11 +10,13 @@
 //   7) stream-push / stream-consume / stream-status：Stream 消息队列（消费组 + 死信抢占）
 //   8) pubsub-publish / pubsub-subscribe：跨语言 PubSub（普通/模式/分片）
 //   9) write-advanced / verify-advanced：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION...）
-//  10) exists  ：只读探针，检查某个键是否存在（给严格拓扑联调用）
-//  11) selftest：离线校验编码器字节格式（无需 Redis）
-//  12) report  ：查看双方回执
-//  13) clean   ：清理本 Demo 的键
-//  14) auto    ：write + verify + report
+//  10) verify-ops / reset-ops / verify-ops-empty：运维 API 面互通（SLOWLOG/LATENCY）
+//  11) exists  ：只读探针，检查某个键是否存在（给严格拓扑联调用）
+//  12) set-key ：写入任意单键字符串（给严格拓扑/TLS 联调用）
+//  13) selftest：离线校验编码器字节格式（无需 Redis）
+//  14) report  ：查看双方回执
+//  15) clean   ：清理本 Demo 的键
+//  16) auto    ：write + verify + report
 //
 // 用法：
 //   dotnet run --project demo\csharp\PekRRedisDemo -- selftest
@@ -51,6 +53,15 @@ const int SampleInt = 123456789;
 const int SampleCount = 7;
 const string SampleName = "互通Demo";
 const string AdvancedFunctionLibrary = "#!lua name=advlib\nredis.register_function('echo', function(keys, args) return args[1] end)\n";
+const long OpsSlowlogId = 101;
+const long OpsSlowlogTimestamp = 1727424000;
+const long OpsSlowlogDurationUs = 12345;
+string[] OpsSlowlogCommand = ["SET", "ops:key", "42"];
+const string OpsLatencyEvent = "command";
+const long OpsLatencyTimestamp = 1727424001;
+const long OpsLatencyLatestMs = 15;
+const long OpsLatencyMaxMs = 42;
+const string OpsDoctorText = "latency spikes";
 
 var failures = new List<string>();
 
@@ -154,8 +165,28 @@ switch (command)
         using (var rds = Connect()) VerifyAdvanced(rds);
         break;
 
+    case "verify-ops":
+        using (var rds = Connect()) VerifyOps(rds);
+        break;
+
+    case "reset-ops":
+        using (var rds = Connect()) ResetOps(rds);
+        break;
+
+    case "verify-ops-empty":
+        using (var rds = Connect()) VerifyOpsEmpty(rds);
+        break;
+
     case "exists":
         using (var rds = Connect()) Exists(rds, GetOpt("--key", "rust:marker"));
+        break;
+
+    case "set-key":
+        using (var rds = Connect()) SetKey(
+            rds,
+            GetOpt("--key", "probe"),
+            GetOpt("--value", "value"),
+            Int32.TryParse(GetOpt("--expire", "0"), out var se) ? se : 0);
         break;
 
     case "report":
@@ -176,7 +207,7 @@ switch (command)
         break;
 
     default:
-        Console.WriteLine($"未知命令：{command}（可用：selftest/write/verify/write-advanced/verify-advanced/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+        Console.WriteLine($"未知命令：{command}（可用：selftest/set-key/write/verify/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
         return 2;
 }
 
@@ -344,6 +375,8 @@ String? RespString(Object? value) => value switch
     null => null,
     _ => value.ToString(),
 };
+
+Int64 RespInt(Object? value) => Int64.Parse(RespString(value) ?? "0", System.Globalization.CultureInfo.InvariantCulture);
 
 Double RespDouble(Object? value) => Double.Parse(RespString(value) ?? "0", System.Globalization.CultureInfo.InvariantCulture);
 
@@ -607,6 +640,89 @@ void Exists(FullRedis rds, string key)
 {
     var value = rds.Get<String>(key);
     Console.WriteLine($"[exists/{Side}] key={key} exists={(value != null).ToString().ToLowerInvariant()} value={value ?? ""}");
+}
+
+void SetKey(FullRedis rds, string key, string value, int expire)
+{
+    rds.Set(key, value, expire);
+    Console.WriteLine($"[set-key/{Side}] key={key} value={value} expire={expire}");
+}
+
+void VerifyOps(FullRedis rds)
+{
+    Console.WriteLine($"[verify-ops/{Side}] 校验运维 API 面（SLOWLOG/LATENCY）");
+
+    var slowlogLen = rds.Execute<Int32>(rc => rc.Execute<Int32>("SLOWLOG", "LEN"));
+    Check(slowlogLen == 1, "SLOWLOG LEN == 1", slowlogLen.ToString());
+
+    var slowlogRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("SLOWLOG", "GET", 10));
+    var slowlogEntry = slowlogRaw?.FirstOrDefault() as Object[];
+    Check(slowlogEntry != null, "SLOWLOG GET 返回条目", slowlogRaw == null ? "null" : $"count={slowlogRaw.Length}");
+    if (slowlogEntry != null)
+    {
+        Check(RespInt(slowlogEntry.ElementAtOrDefault(0)) == OpsSlowlogId, "SLOWLOG id", RespInt(slowlogEntry.ElementAtOrDefault(0)).ToString());
+        Check(RespInt(slowlogEntry.ElementAtOrDefault(1)) == OpsSlowlogTimestamp, "SLOWLOG timestamp", RespInt(slowlogEntry.ElementAtOrDefault(1)).ToString());
+        Check(RespInt(slowlogEntry.ElementAtOrDefault(2)) == OpsSlowlogDurationUs, "SLOWLOG duration_us", RespInt(slowlogEntry.ElementAtOrDefault(2)).ToString());
+
+        var command = (slowlogEntry.ElementAtOrDefault(3) as Object[])?.Select(RespString).Where(x => x != null).Cast<String>().ToArray() ?? [];
+        Check(command.SequenceEqual(OpsSlowlogCommand), "SLOWLOG command", String.Join(",", command));
+    }
+
+    var historyRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("LATENCY", "HISTORY", OpsLatencyEvent));
+    var historyEntry = historyRaw?.FirstOrDefault() as Object[];
+    Check(historyEntry != null && historyRaw?.Length == 1, "LATENCY HISTORY 命中样本事件", historyRaw == null ? "null" : $"count={historyRaw.Length}");
+    if (historyEntry != null)
+    {
+        Check(RespInt(historyEntry.ElementAtOrDefault(0)) == OpsLatencyTimestamp, "LATENCY HISTORY timestamp", RespInt(historyEntry.ElementAtOrDefault(0)).ToString());
+        Check(RespInt(historyEntry.ElementAtOrDefault(1)) == OpsLatencyLatestMs, "LATENCY HISTORY latest", RespInt(historyEntry.ElementAtOrDefault(1)).ToString());
+    }
+
+    var latestRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("LATENCY", "LATEST"));
+    var latestEntry = (latestRaw ?? []).OfType<Object[]>().FirstOrDefault(x => RespString(x.ElementAtOrDefault(0)) == OpsLatencyEvent);
+    Check(latestEntry != null, "LATENCY LATEST 包含样本事件", latestRaw == null ? "null" : $"count={latestRaw.Length}");
+    if (latestEntry != null)
+    {
+        Check(RespInt(latestEntry.ElementAtOrDefault(1)) == OpsLatencyTimestamp, "LATENCY LATEST timestamp", RespInt(latestEntry.ElementAtOrDefault(1)).ToString());
+        Check(RespInt(latestEntry.ElementAtOrDefault(2)) == OpsLatencyLatestMs, "LATENCY LATEST latest", RespInt(latestEntry.ElementAtOrDefault(2)).ToString());
+        Check(RespInt(latestEntry.ElementAtOrDefault(3)) == OpsLatencyMaxMs, "LATENCY LATEST max", RespInt(latestEntry.ElementAtOrDefault(3)).ToString());
+    }
+
+    var doctor = rds.Execute<String?>(rc => rc.Execute<String>("LATENCY", "DOCTOR"));
+    Check((doctor ?? "").Contains(OpsDoctorText, StringComparison.OrdinalIgnoreCase), "LATENCY DOCTOR 返回诊断文本", doctor);
+}
+
+void ResetOps(FullRedis rds)
+{
+    Console.WriteLine($"[reset-ops/{Side}] 重置运维 API 样本（SLOWLOG/LATENCY）");
+
+    var before = rds.Execute<Int32>(rc => rc.Execute<Int32>("SLOWLOG", "LEN"));
+    Check(before == 1, "SLOWLOG RESET 前条数 == 1", before.ToString());
+    _ = rds.Execute<String?>(rc => rc.Execute<String>("SLOWLOG", "RESET"));
+    var after = rds.Execute<Int32>(rc => rc.Execute<Int32>("SLOWLOG", "LEN"));
+    Check(after == 0, "SLOWLOG RESET 后条数 == 0", after.ToString());
+
+    var reset = rds.Execute<Int32>(rc => rc.Execute<Int32>("LATENCY", "RESET", OpsLatencyEvent));
+    Check(reset == 1, "LATENCY RESET 清空样本事件", reset.ToString());
+    var historyRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("LATENCY", "HISTORY", OpsLatencyEvent));
+    Check(historyRaw == null || historyRaw.Length == 0, "LATENCY HISTORY 已清空", historyRaw == null ? "null" : $"count={historyRaw.Length}");
+}
+
+void VerifyOpsEmpty(FullRedis rds)
+{
+    Console.WriteLine($"[verify-ops-empty/{Side}] 校验运维 API 样本已被清空");
+
+    var slowlogLen = rds.Execute<Int32>(rc => rc.Execute<Int32>("SLOWLOG", "LEN"));
+    Check(slowlogLen == 0, "SLOWLOG LEN == 0", slowlogLen.ToString());
+
+    var slowlogRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("SLOWLOG", "GET", 10));
+    Check(slowlogRaw == null || slowlogRaw.Length == 0, "SLOWLOG GET 为空", slowlogRaw == null ? "null" : $"count={slowlogRaw.Length}");
+
+    var historyRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("LATENCY", "HISTORY", OpsLatencyEvent));
+    Check(historyRaw == null || historyRaw.Length == 0, "LATENCY HISTORY 为空", historyRaw == null ? "null" : $"count={historyRaw.Length}");
+
+    var latestRaw = rds.Execute<Object[]?>(rc => rc.Execute<Object[]>("LATENCY", "LATEST"));
+    var hasEvent = (latestRaw ?? []).OfType<Object[]>().Any(x => RespString(x.ElementAtOrDefault(0)) == OpsLatencyEvent);
+    Check(!hasEvent, "LATENCY LATEST 不含样本事件", latestRaw == null ? "null" : $"count={latestRaw.Length}");
 }
 
 // ======================= PubSub =======================

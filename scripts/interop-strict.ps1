@@ -160,7 +160,9 @@ function Start-MockRedis {
         [string]$InfoText,
         [string]$InfoReplication,
         [string]$InfoSentinel,
-        [string]$ClusterNodes
+        [string]$ClusterNodes,
+        [string]$SlowlogData,
+        [string]$LatencyData
     )
 
     $exe = Get-MockRedisExe
@@ -192,6 +194,16 @@ function Start-MockRedis {
         $file = New-Utf8TempFile -Name ("$Name.cluster-nodes.txt") -Content $ClusterNodes
         $files += $file
         $args += @("--cluster-nodes-file", $file)
+    }
+    if ($SlowlogData) {
+        $file = New-Utf8TempFile -Name ("$Name.slowlog.txt") -Content $SlowlogData
+        $files += $file
+        $args += @("--slowlog-file", $file)
+    }
+    if ($LatencyData) {
+        $file = New-Utf8TempFile -Name ("$Name.latency.txt") -Content $LatencyData
+        $files += $file
+        $args += @("--latency-file", $file)
     }
 
     $outFile = Join-Path $PWD "target\$Name.mock.stdout.txt"
@@ -245,8 +257,8 @@ function Test-ReplicationInterop {
     $masterInfo = "# Replication`r`nrole:master`r`nconnected_slaves:1`r`nslave0:ip=127.0.0.1,port=$replicaPort,state=online,offset=1,lag=0`r`n"
     $replicaInfo = "# Replication`r`nrole:slave`r`nmaster_host:127.0.0.1`r`nmaster_port:$masterPort`r`nconnected_slaves:0`r`n"
 
-    $master = Start-MockRedis -Name "strict-repl-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes ""
-    $replica = Start-MockRedis -Name "strict-repl-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes ""
+    $master = Start-MockRedis -Name "strict-repl-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $replica = Start-MockRedis -Name "strict-repl-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
     try {
         $topologyConfig = "server=$masterAddr,$replicaAddr;db=0;mode=replication;readfromreplicas=true"
         $masterConfig = "server=$masterAddr;db=0"
@@ -288,9 +300,9 @@ function Test-SentinelInterop {
     $masterInfo = "# Replication`r`nrole:master`r`nconnected_slaves:1`r`nslave0:ip=127.0.0.1,port=$replicaPort,state=online,offset=1,lag=0`r`n"
     $replicaInfo = "# Replication`r`nrole:slave`r`nmaster_host:127.0.0.1`r`nmaster_port:$masterPort`r`nconnected_slaves:0`r`n"
 
-    $sentinel = Start-MockRedis -Name "strict-sentinel" -Port $sentinelPort -InfoMode "" -InfoText $sentinelInfo -InfoReplication "" -InfoSentinel $sentinelInfo -ClusterNodes ""
-    $master = Start-MockRedis -Name "strict-sentinel-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes ""
-    $replica = Start-MockRedis -Name "strict-sentinel-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes ""
+    $sentinel = Start-MockRedis -Name "strict-sentinel" -Port $sentinelPort -InfoMode "" -InfoText $sentinelInfo -InfoReplication "" -InfoSentinel $sentinelInfo -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $master = Start-MockRedis -Name "strict-sentinel-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $replica = Start-MockRedis -Name "strict-sentinel-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
     try {
         $topologyConfig = "server=$sentinelAddr;db=0;mode=sentinel;sentinelmastername=redis-master;readfromreplicas=true"
         $masterConfig = "server=$masterAddr;db=0"
@@ -318,6 +330,82 @@ function Test-SentinelInterop {
         Stop-MockRedis $sentinel
         Stop-MockRedis $master
         Stop-MockRedis $replica
+    }
+}
+
+function Test-ClusterInterop {
+    $prefixA = "${Prefix}cluster-a:"
+    $prefixB = "${Prefix}cluster-b:"
+    $seedPort = 16385
+    $targetPort = 16386
+    $seedAddr = "127.0.0.1:$seedPort"
+    $targetAddr = "127.0.0.1:$targetPort"
+    $clusterNodes = "master-a $seedAddr@0 master - 0 0 1 connected 0-5460`nmaster-b $targetAddr@0 master - 0 0 2 connected 5461-16383"
+
+    $seed = Start-MockRedis -Name "strict-cluster-seed" -Port $seedPort -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes $clusterNodes -SlowlogData "" -LatencyData ""
+    $target = Start-MockRedis -Name "strict-cluster-target" -Port $targetPort -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    try {
+        $topologyConfig = "server=$seedAddr;db=0;mode=cluster"
+        $seedConfig = "server=$seedAddr;db=0"
+        $targetConfig = "server=$targetAddr;db=0"
+        $slotKeyOutput = Invoke-RustDemo @("find-slot-key", "--from", "5461", "--to", "16383", "--key-prefix", "cluster:key:{", "--key-suffix", "}")
+        $slotKeyMatch = [regex]::Match($slotKeyOutput, 'key=([^\s]+)')
+        if (-not $slotKeyMatch.Success) {
+            throw "Unable to parse cluster slot key from output:`n$slotKeyOutput"
+        }
+        $slotKey = $slotKeyMatch.Groups[1].Value
+
+        Invoke-RustDemo @("clean", "--config", $seedConfig, "--prefix", $prefixA) | Out-Host
+        Invoke-RustDemo @("clean", "--config", $targetConfig, "--prefix", $prefixA) | Out-Host
+
+        Invoke-CSharpDemo @("set-key", "--key", $slotKey, "--value", "csharp-cluster", "--config", $topologyConfig, "--prefix", $prefixA) | Out-Host
+        $seedMiss = Invoke-RustDemo @("exists", "--key", $slotKey, "--config", $seedConfig, "--prefix", $prefixA)
+        $targetHas = Invoke-RustDemo @("exists", "--key", $slotKey, "--config", $targetConfig, "--prefix", $prefixA)
+        Test-ExistsOutput $seedMiss $false "Cluster write should not remain on seed node"
+        Test-ExistsOutput $targetHas $true "Cluster write should route to target slot owner"
+
+        Invoke-RustDemo @("clean", "--config", $seedConfig, "--prefix", $prefixB) | Out-Host
+        Invoke-RustDemo @("clean", "--config", $targetConfig, "--prefix", $prefixB) | Out-Host
+
+        Invoke-RustDemo @("set-key", "--key", $slotKey, "--value", "rust-cluster", "--config", $topologyConfig, "--prefix", $prefixB) | Out-Host
+        $seedMissRust = Invoke-CSharpDemo @("exists", "--key", $slotKey, "--config", $seedConfig, "--prefix", $prefixB)
+        $targetHasRust = Invoke-CSharpDemo @("exists", "--key", $slotKey, "--config", $targetConfig, "--prefix", $prefixB)
+        Test-ExistsOutput $seedMissRust $false "Rust cluster write should not remain on seed node"
+        Test-ExistsOutput $targetHasRust $true "Rust cluster write should route to target slot owner"
+    }
+    finally {
+        Stop-MockRedis $seed
+        Stop-MockRedis $target
+    }
+}
+
+function Test-OperationalInterop {
+    $portA = 16387
+    $portB = 16388
+    $configA = "server=127.0.0.1:$portA;db=0"
+    $configB = "server=127.0.0.1:$portB;db=0"
+    $slowlogSeed = "101|1727424000|12345|SET ops:key 42"
+    $latencySeed = "command|1727424001|15|42"
+
+    $caseA = Start-MockRedis -Name "strict-ops-csharp-reset" -Port $portA -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData $slowlogSeed -LatencyData $latencySeed
+    try {
+        Invoke-CSharpDemo @("verify-ops", "--config", $configA, "--prefix", $Prefix) | Out-Host
+        Invoke-RustDemo @("verify-ops", "--config", $configA, "--prefix", $Prefix) | Out-Host
+        Invoke-CSharpDemo @("reset-ops", "--config", $configA, "--prefix", $Prefix) | Out-Host
+        Invoke-RustDemo @("verify-ops-empty", "--config", $configA, "--prefix", $Prefix) | Out-Host
+    }
+    finally {
+        Stop-MockRedis $caseA
+    }
+
+    $caseB = Start-MockRedis -Name "strict-ops-rust-reset" -Port $portB -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData $slowlogSeed -LatencyData $latencySeed
+    try {
+        Invoke-RustDemo @("verify-ops", "--config", $configB, "--prefix", $Prefix) | Out-Host
+        Invoke-RustDemo @("reset-ops", "--config", $configB, "--prefix", $Prefix) | Out-Host
+        Invoke-CSharpDemo @("verify-ops-empty", "--config", $configB, "--prefix", $Prefix) | Out-Host
+    }
+    finally {
+        Stop-MockRedis $caseB
     }
 }
 
@@ -481,6 +569,14 @@ Invoke-Step "Replication topology interop" {
 
 Invoke-Step "Sentinel topology interop" {
     Test-SentinelInterop
+}
+
+Invoke-Step "Cluster topology interop" {
+    Test-ClusterInterop
+}
+
+Invoke-Step "Operational API interop" {
+    Test-OperationalInterop
 }
 
 Invoke-Step "Reliable queue bidirectional consume/ack" {
