@@ -2389,8 +2389,15 @@ fn dispatch(
             }
         }
         "FCALL" | "FCALL_RO" => {
-            let function = String::from_utf8_lossy(&args[1]).to_string();
-            let numkeys = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
+            let function = args
+                .get(1)
+                .map(|v| String::from_utf8_lossy(v).to_string())
+                .unwrap_or_default();
+            let numkeys = args
+                .get(2)
+                .and_then(|v| parse_i64(v))
+                .unwrap_or(0)
+                .max(0) as usize;
             if function.contains("echo") {
                 match args.get(3 + numkeys).cloned() {
                     Some(v) => (bulk(&v), false),

@@ -277,6 +277,15 @@ Invoke-Step "Bidirectional fixed sample read/write" {
     Assert-Text $cVerify 'csharp:receipt' "C# verify did not write receipt"
 }
 
+Invoke-Step "Advanced helper/direct API interop" {
+    $cWriteAdvanced = Invoke-CSharpDemo @("write-advanced", "--config", $Config, "--prefix", $Prefix)
+    $rVerifyAdvanced = Invoke-RustDemo @("verify-advanced", "--config", $Config, "--prefix", $Prefix)
+    $rWriteAdvanced = Invoke-RustDemo @("write-advanced", "--config", $Config, "--prefix", $Prefix)
+    $cVerifyAdvanced = Invoke-CSharpDemo @("verify-advanced", "--config", $Config, "--prefix", $Prefix)
+    Assert-Text $rVerifyAdvanced 'rust:receipt' "Rust advanced verify did not write receipt"
+    Assert-Text $cVerifyAdvanced 'csharp:receipt' "C# advanced verify did not write receipt"
+}
+
 Invoke-Step "Reliable queue bidirectional consume/ack" {
     $cPush = Invoke-CSharpDemo @("push", "--count", "5", "--config", $Config, "--prefix", $Prefix)
     $rConsume = Invoke-RustDemo @("consume", "--count", "5", "--config", $Config, "--prefix", $Prefix)

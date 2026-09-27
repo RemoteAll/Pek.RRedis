@@ -13,6 +13,7 @@
 //! stream-consume ：用消费组消费 N 条并确认（--no-ack 留作死信）
 //! stream-status  ：查看流长度 / 消费组 / 挂起 / 消费者
 //! pubsub-publish / pubsub-subscribe ：跨语言 PubSub（普通/模式/分片）
+//! write-advanced / verify-advanced ：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION 等）
 //! selftest：离线校验编码器字节格式（无需 Redis）
 //! report  ：查看双方回执
 //! clean   ：清理本 Demo 的键
@@ -182,6 +183,11 @@ fn run() -> i32 {
             );
             0
         }
+        "write-advanced" => {
+            ctx.write_advanced();
+            0
+        }
+        "verify-advanced" => ctx.verify_advanced(),
         "report" => {
             ctx.report();
             0
@@ -197,7 +203,7 @@ fn run() -> i32 {
             code
         }
         other => {
-            println!("未知命令：{other}（可用：selftest/write/verify/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+            println!("未知命令：{other}（可用：selftest/write/verify/write-advanced/verify-advanced/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
             2
         }
     };
@@ -230,6 +236,8 @@ const SAMPLE_STRING: &str = "Hello 互通";
 const SAMPLE_INT: i32 = 123456789;
 const SAMPLE_COUNT: i32 = 7;
 const SAMPLE_NAME: &str = "互通Demo";
+const ADV_FUNCTION_LIBRARY: &str =
+    "#!lua name=advlib\nredis.register_function('echo', function(keys, args) return args[1] end)\n";
 
 /// 固定样本模型（与 C# `DemoModel` 字段一致，属性名 PascalCase）
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -300,6 +308,17 @@ impl DemoCtx {
                 self.failures.push(what.to_string());
             }
         }
+    }
+
+    fn write_receipt(&mut self) {
+        let receipt = DemoReceipt {
+            side: SIDE.into(),
+            time: Local::now().naive_local(),
+            failures: self.failures.clone(),
+        };
+        let key = format!("{SIDE}:receipt");
+        self.set(&key, Json(&receipt), 3600).unwrap();
+        println!("  · 已写入回执 {}{key}", self.prefix);
     }
 
     // ---------------- write ----------------
@@ -453,16 +472,306 @@ impl DemoCtx {
         queue.add(&"q1".into()).unwrap();
         queue.add(&"q2".into()).unwrap();
 
-        // 回执
-        let receipt = DemoReceipt {
-            side: SIDE.into(),
-            time: Local::now().naive_local(),
-            failures: self.failures.clone(),
-        };
-        let key = format!("{SIDE}:receipt");
-        self.set(&key, Json(&receipt), 3600).unwrap();
-        println!("  · 已写入回执 {}{key}", self.prefix);
+        self.write_receipt();
 
+        if self.failures.is_empty() { 0 } else { 1 }
+    }
+
+    fn write_advanced(&mut self) {
+        println!("[write-advanced/{SIDE}] 写入高级 API 联调样本 → prefix={}", self.prefix);
+        let rds = self.rds.clone();
+
+        let _ = rds.function_delete("advlib");
+        rds.remove_many(&[
+            "adv:writer",
+            "adv:getex",
+            "adv:bits",
+            "adv:hash",
+            "adv:list:move:src",
+            "adv:list:move:dst",
+            "adv:list:multi:1",
+            "adv:list:multi:2",
+            "adv:list:block:empty",
+            "adv:list:block:right",
+            "adv:list:block:left",
+            "adv:set:1",
+            "adv:set:2",
+            "adv:zset:score",
+            "adv:zset:rand",
+            "adv:zset:range",
+            "adv:zset:range:dest",
+            "adv:zset:pop:1",
+            "adv:zset:pop:2",
+        ])
+        .unwrap();
+
+        rds.redis().set(self.full_key("adv:writer"), SIDE, 3600).unwrap();
+        rds.redis()
+            .set(self.full_key("adv:getex"), format!("from-{SIDE}"), 0)
+            .unwrap();
+        rds.redis()
+            .set(self.full_key("adv:bits"), vec![0b1010_0000u8], 0)
+            .unwrap();
+
+        let hash = rds.get_hash::<String>("adv:hash");
+        hash.set(&"del".to_string(), &"value-del".to_string()).unwrap();
+        hash.set(&"ex".to_string(), &"value-ex".to_string()).unwrap();
+
+        let move_src = rds.get_list::<String>("adv:list:move:src");
+        move_src
+            .push_back_many(&["1".into(), "2".into(), "3".into()])
+            .unwrap();
+        let multi = rds.get_list::<String>("adv:list:multi:2");
+        multi.push_back_many(&["m1".into(), "m2".into()]).unwrap();
+        let block_right = rds.get_list::<String>("adv:list:block:right");
+        block_right
+            .push_back_many(&["ra".into(), "rb".into()])
+            .unwrap();
+        let block_left = rds.get_list::<String>("adv:list:block:left");
+        block_left
+            .push_back_many(&["la".into(), "lb".into()])
+            .unwrap();
+
+        rds.get_set::<String>("adv:set:1")
+            .add(&["a".into(), "b".into(), "c".into()])
+            .unwrap();
+        rds.get_set::<String>("adv:set:2")
+            .add(&["b".into(), "c".into(), "d".into()])
+            .unwrap();
+
+        let zscore = rds.get_sorted_set::<String>("adv:zset:score");
+        zscore.add(&"a".to_string(), 1.0).unwrap();
+        zscore.add(&"b".to_string(), 2.0).unwrap();
+        let zrand = rds.get_sorted_set::<String>("adv:zset:rand");
+        zrand.add(&"ra".to_string(), 1.0).unwrap();
+        zrand.add(&"rb".to_string(), 2.0).unwrap();
+        zrand.add(&"rc".to_string(), 3.0).unwrap();
+        let zrange = rds.get_sorted_set::<String>("adv:zset:range");
+        zrange.add(&"a".to_string(), 1.0).unwrap();
+        zrange.add(&"b".to_string(), 2.0).unwrap();
+        zrange.add(&"c".to_string(), 3.0).unwrap();
+        let zpop = rds.get_sorted_set::<String>("adv:zset:pop:1");
+        zpop.add(&"p1".to_string(), 1.0).unwrap();
+        zpop.add(&"p2".to_string(), 2.0).unwrap();
+
+        let lib = rds.function_load(ADV_FUNCTION_LIBRARY, true).unwrap();
+        println!("  ✔ 已写入高级样本：adv:* + function lib={lib}");
+    }
+
+    fn verify_advanced(&mut self) -> i32 {
+        println!("[verify-advanced/{SIDE}] 校验高级 API 面（含对方 {OTHER} 写入的数据）");
+
+        let writer = self.get_string("adv:writer").unwrap();
+        self.check(
+            writer.as_deref() == Some(OTHER),
+            "adv writer marker",
+            writer.clone(),
+        );
+
+        let getex: Option<String> = self.rds.get_ex("adv:getex", 120).unwrap();
+        self.check(
+            getex.as_deref() == Some(&format!("from-{OTHER}")),
+            "GETEX 读取对方样本",
+            getex.clone(),
+        );
+        let expire = self.rds.expire_time("adv:getex").unwrap();
+        self.check(expire > 0, "EXPIRETIME > 0", Some(expire.to_string()));
+        let pexpire = self.rds.pexpire_time("adv:getex").unwrap();
+        self.check(pexpire > 0, "PEXPIRETIME > 0", Some(pexpire.to_string()));
+        let persist: Option<String> = self.rds.get_ex("adv:getex", 0).unwrap();
+        self.check(
+            persist.as_deref() == Some(&format!("from-{OTHER}")),
+            "GETEX PERSIST 读回",
+            persist.clone(),
+        );
+        let expire2 = self.rds.expire_time("adv:getex").unwrap();
+        self.check(expire2 == -1, "GETEX PERSIST 清除过期", Some(expire2.to_string()));
+        let idle = self.rds.object_idle_time("adv:getex").unwrap();
+        self.check(idle == Some(0), "OBJECT IDLETIME", idle.map(|v| v.to_string()));
+        let freq = self.rds.object_freq("adv:getex").unwrap();
+        self.check(freq == Some(0), "OBJECT FREQ", freq.map(|v| v.to_string()));
+
+        let bit = self.rds.bit_field("adv:bits", &["GET", "u8", "0"]).unwrap();
+        self.check(bit == vec![160], "BITFIELD GET u8 0", Some(format!("{bit:?}")));
+
+        let hash = self.rds.get_hash::<String>("adv:hash");
+        let deleted = hash.hgetdel(&"del".to_string()).unwrap();
+        self.check(
+            deleted.as_deref() == Some("value-del"),
+            "HGETDEL 返回旧值",
+            deleted.clone(),
+        );
+        self.check(
+            hash.get(&"del".to_string()).unwrap().is_none(),
+            "HGETDEL 删除字段",
+            None,
+        );
+        let kept = hash.hgetex(&"ex".to_string(), 60).unwrap();
+        self.check(
+            kept.as_deref() == Some("value-ex"),
+            "HGETEX 返回字段值",
+            kept.clone(),
+        );
+
+        let moved = self
+            .rds
+            .lmove::<String>("adv:list:move:src", "adv:list:move:dst", false, true)
+            .unwrap();
+        self.check(
+            moved.as_deref() == Some("3"),
+            "LMOVE RIGHT->LEFT",
+            moved.clone(),
+        );
+        let blmoved = self
+            .rds
+            .blmove::<String>("adv:list:move:src", "adv:list:move:dst", true, false, 1)
+            .unwrap();
+        self.check(
+            blmoved.as_deref() == Some("1"),
+            "BLMOVE LEFT->RIGHT",
+            blmoved.clone(),
+        );
+        let moved_list = self.rds.get_list::<String>("adv:list:move:dst").get_all().unwrap();
+        self.check(
+            moved_list == vec!["3".to_string(), "1".to_string()],
+            "LMOVE/BLMOVE 目标列表顺序",
+            Some(format!("{moved_list:?}")),
+        );
+
+        match self
+            .rds
+            .lmpop::<String>(&["adv:list:multi:1", "adv:list:multi:2"], true, 2)
+            .unwrap()
+        {
+            Some((key, items)) => self.check(
+                key.ends_with("adv:list:multi:2")
+                    && items == vec!["m1".to_string(), "m2".to_string()],
+                "LMPOP 多键弹出",
+                Some(format!("{key} => {items:?}")),
+            ),
+            None => self.check(false, "LMPOP 多键弹出", Some("None".into())),
+        }
+
+        match self
+            .rds
+            .brpop_multi::<String>(&["adv:list:block:empty", "adv:list:block:right"], 1)
+            .unwrap()
+        {
+            Some((key, value)) => self.check(
+                key.ends_with("adv:list:block:right") && value == "rb",
+                "BRPOP 多键阻塞弹出",
+                Some(format!("{key} => {value}")),
+            ),
+            None => self.check(false, "BRPOP 多键阻塞弹出", Some("None".into())),
+        }
+
+        match self
+            .rds
+            .blpop_multi::<String>(&["adv:list:block:empty", "adv:list:block:left"], 1)
+            .unwrap()
+        {
+            Some((key, value)) => self.check(
+                key.ends_with("adv:list:block:left") && value == "la",
+                "BLPOP 多键阻塞弹出",
+                Some(format!("{key} => {value}")),
+            ),
+            None => self.check(false, "BLPOP 多键阻塞弹出", Some("None".into())),
+        }
+
+        let members = self
+            .rds
+            .get_set::<String>("adv:set:1")
+            .mismember(&["a".into(), "x".into(), "c".into()])
+            .unwrap();
+        self.check(
+            members == vec![true, false, true],
+            "SMISMEMBER 成员存在性",
+            Some(format!("{members:?}")),
+        );
+        let sinter = self.rds.sinter_card(&["adv:set:1", "adv:set:2"], 0).unwrap();
+        self.check(sinter == 2, "SINTERCARD 交集基数", Some(sinter.to_string()));
+
+        let scores = self.rds.zmscore("adv:zset:score", &["a", "b"]).unwrap();
+        self.check(
+            scores == vec![Some(1.0), Some(2.0)],
+            "ZMSCORE 批量分数",
+            Some(format!("{scores:?}")),
+        );
+        let rand_members = self.rds.zrand_member::<String>("adv:zset:rand", 2).unwrap();
+        let rand_ok = rand_members.len() == 2
+            && rand_members
+                .iter()
+                .all(|item| ["ra", "rb", "rc"].contains(&item.as_str()));
+        self.check(
+            rand_ok,
+            "ZRANDMEMBER 随机成员",
+            Some(format!("{rand_members:?}")),
+        );
+        let stored = self
+            .rds
+            .get_sorted_set::<String>("adv:zset:range")
+            .range_store("adv:zset:range:dest", 1.5, 3.0, true, false, 0, 10)
+            .unwrap();
+        self.check(stored == 2, "ZRANGESTORE 存储数量", Some(stored.to_string()));
+        let stored_values = self
+            .rds
+            .get_sorted_set::<String>("adv:zset:range:dest")
+            .range_by_score(0.0, 10.0, 0, 10)
+            .unwrap();
+        self.check(
+            stored_values == vec!["b".to_string(), "c".to_string()],
+            "ZRANGESTORE 结果可读",
+            Some(format!("{stored_values:?}")),
+        );
+
+        match self
+            .rds
+            .zmpop::<String>(&["adv:zset:pop:2", "adv:zset:pop:1"], true, 2)
+            .unwrap()
+        {
+            Some((key, items)) => self.check(
+                key.ends_with("adv:zset:pop:1")
+                    && items
+                        == vec![
+                            ("p1".to_string(), 1.0),
+                            ("p2".to_string(), 2.0),
+                        ],
+                "ZMPOP 弹出最小分成员",
+                Some(format!("{key} => {items:?}")),
+            ),
+            None => self.check(false, "ZMPOP 弹出最小分成员", Some("None".into())),
+        }
+
+        let wait = self.rds.wait(1, 10).unwrap();
+        self.check(wait == 0, "WAIT 单实例确认数", Some(wait.to_string()));
+
+        let libs = self.rds.function_list(Some("advlib")).unwrap();
+        self.check(
+            !libs.is_empty(),
+            "FUNCTION LIST 可见对方函数库",
+            Some(libs.len().to_string()),
+        );
+        let echo: Option<String> = self.rds.fcall("echo", &[], &["hello-interop"]).unwrap();
+        self.check(
+            echo.as_deref() == Some("hello-interop"),
+            "FCALL 回声函数",
+            echo.clone(),
+        );
+        let echo_ro: Option<String> = self.rds.fcall_ro("echo", &[], &["hello-ro"]).unwrap();
+        self.check(
+            echo_ro.as_deref() == Some("hello-ro"),
+            "FCALL_RO 回声函数",
+            echo_ro.clone(),
+        );
+        self.rds.function_delete("advlib").unwrap();
+        let libs_after = self.rds.function_list(Some("advlib")).unwrap();
+        self.check(
+            libs_after.is_empty(),
+            "FUNCTION DELETE 删除函数库",
+            Some(libs_after.len().to_string()),
+        );
+
+        self.write_receipt();
         if self.failures.is_empty() { 0 } else { 1 }
     }
 

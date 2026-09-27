@@ -9,10 +9,11 @@
 //   6) lock    ：申请分布式锁、持有若干秒后释放（可与对方进程抢锁）
 //   7) stream-push / stream-consume / stream-status：Stream 消息队列（消费组 + 死信抢占）
 //   8) pubsub-publish / pubsub-subscribe：跨语言 PubSub（普通/模式/分片）
-//   9) selftest：离线校验编码器字节格式（无需 Redis）
-//  10) report  ：查看双方回执
-//  11) clean   ：清理本 Demo 的键
-//  12) auto    ：write + verify + report
+//   9) write-advanced / verify-advanced：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION...）
+//  10) selftest：离线校验编码器字节格式（无需 Redis）
+//  11) report  ：查看双方回执
+//  12) clean   ：清理本 Demo 的键
+//  13) auto    ：write + verify + report
 //
 // 用法：
 //   dotnet run --project demo\csharp\PekRRedisDemo -- selftest
@@ -48,6 +49,7 @@ const string SampleString = "Hello 互通";
 const int SampleInt = 123456789;
 const int SampleCount = 7;
 const string SampleName = "互通Demo";
+const string AdvancedFunctionLibrary = "#!lua name=advlib\nredis.register_function('echo', function(keys, args) return args[1] end)\n";
 
 var failures = new List<string>();
 
@@ -143,6 +145,14 @@ switch (command)
                 argsList.Contains("--shard"));
         break;
 
+    case "write-advanced":
+        using (var rds = Connect()) WriteAdvanced(rds);
+        break;
+
+    case "verify-advanced":
+        using (var rds = Connect()) VerifyAdvanced(rds);
+        break;
+
     case "report":
         using (var rds = Connect()) Report(rds);
         break;
@@ -161,7 +171,7 @@ switch (command)
         break;
 
     default:
-        Console.WriteLine($"未知命令：{command}（可用：selftest/write/verify/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+        Console.WriteLine($"未知命令：{command}（可用：selftest/write/verify/write-advanced/verify-advanced/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
         return 2;
 }
 
@@ -308,7 +318,11 @@ void Verify(FullRedis rds)
     queue.Add("q1");
     queue.Add("q2");
 
-    // 回执
+    WriteReceipt(rds);
+}
+
+void WriteReceipt(FullRedis rds)
+{
     var receipt = new DemoReceipt
     {
         Side = Side,
@@ -317,6 +331,195 @@ void Verify(FullRedis rds)
     };
     rds.Set($"{Side}:receipt", receipt.ToJsonText(), 3600);
     Console.WriteLine($"  · 已写入回执 {prefix}{Side}:receipt");
+}
+
+String? RespString(Object? value) => value switch
+{
+    IPacket pk => pk.ToStr(),
+    null => null,
+    _ => value.ToString(),
+};
+
+Double RespDouble(Object? value) => Double.Parse(RespString(value) ?? "0", System.Globalization.CultureInfo.InvariantCulture);
+
+void WriteAdvanced(FullRedis rds)
+{
+    Console.WriteLine($"[write-advanced/{Side}] 写入高级 API 联调样本 → prefix={prefix}");
+
+    try { rds.FunctionDelete("advlib"); } catch { }
+    rds.Remove(
+        "adv:writer",
+        "adv:getex",
+        "adv:bits",
+        "adv:hash",
+        "adv:list:move:src",
+        "adv:list:move:dst",
+        "adv:list:multi:1",
+        "adv:list:multi:2",
+        "adv:list:block:empty",
+        "adv:list:block:right",
+        "adv:list:block:left",
+        "adv:set:1",
+        "adv:set:2",
+        "adv:zset:score",
+        "adv:zset:rand",
+        "adv:zset:range",
+        "adv:zset:range:dest",
+        "adv:zset:pop:1",
+        "adv:zset:pop:2");
+
+    rds.Set("adv:writer", Side, 3600);
+    rds.Set("adv:getex", $"from-{Side}", 0);
+    rds.Set("adv:bits", new Byte[] { 0b1010_0000 }, 0);
+
+    var hash = rds.GetDictionary<String>("adv:hash");
+    hash["del"] = "value-del";
+    hash["ex"] = "value-ex";
+
+    var moveSrc = rds.GetList<String>("adv:list:move:src");
+    moveSrc.Add("1");
+    moveSrc.Add("2");
+    moveSrc.Add("3");
+    var multi = rds.GetList<String>("adv:list:multi:2");
+    multi.Add("m1");
+    multi.Add("m2");
+    var blockRight = rds.GetList<String>("adv:list:block:right");
+    blockRight.Add("ra");
+    blockRight.Add("rb");
+    var blockLeft = rds.GetList<String>("adv:list:block:left");
+    blockLeft.Add("la");
+    blockLeft.Add("lb");
+
+    ((RedisSet<String>)rds.GetSet<String>("adv:set:1")).SAdd("a", "b", "c");
+    ((RedisSet<String>)rds.GetSet<String>("adv:set:2")).SAdd("b", "c", "d");
+
+    var zscore = rds.GetSortedSet<String>("adv:zset:score");
+    zscore.Add("a", 1.0);
+    zscore.Add("b", 2.0);
+    var zrand = rds.GetSortedSet<String>("adv:zset:rand");
+    zrand.Add("ra", 1.0);
+    zrand.Add("rb", 2.0);
+    zrand.Add("rc", 3.0);
+    var zrange = rds.GetSortedSet<String>("adv:zset:range");
+    zrange.Add("a", 1.0);
+    zrange.Add("b", 2.0);
+    zrange.Add("c", 3.0);
+    var zpop = rds.GetSortedSet<String>("adv:zset:pop:1");
+    zpop.Add("p1", 1.0);
+    zpop.Add("p2", 2.0);
+
+    var lib = rds.FunctionLoad(AdvancedFunctionLibrary, true);
+    Console.WriteLine($"  ✔ 已写入高级样本：adv:* + function lib={lib}");
+}
+
+void VerifyAdvanced(FullRedis rds)
+{
+    Console.WriteLine($"[verify-advanced/{Side}] 校验高级 API 面（含对方 {OtherSide} 写入的数据）");
+
+    var writer = rds.Get<String>("adv:writer");
+    Check(writer == OtherSide, "adv writer marker", writer);
+
+    var getex = rds.GetEx<String>("adv:getex", 120);
+    Check(getex == $"from-{OtherSide}", "GETEX 读取对方样本", getex);
+    var expire = rds.ExpireTime("adv:getex");
+    Check(expire > 0, "EXPIRETIME > 0", expire.ToString());
+    var pexpire = rds.PExpireTime("adv:getex");
+    Check(pexpire > 0, "PEXPIRETIME > 0", pexpire.ToString());
+    var persist = rds.GetEx<String>("adv:getex", 0);
+    Check(persist == $"from-{OtherSide}", "GETEX PERSIST 读回", persist);
+    Check(rds.ExpireTime("adv:getex") == -1, "GETEX PERSIST 清除过期", rds.ExpireTime("adv:getex").ToString());
+    Check(rds.ObjectIdleTime("adv:getex") == 0, "OBJECT IDLETIME", rds.ObjectIdleTime("adv:getex")?.ToString());
+    Check(rds.ObjectFreq("adv:getex") == 0, "OBJECT FREQ", rds.ObjectFreq("adv:getex")?.ToString());
+
+    var bits = rds.BitField("adv:bits", "GET", "u8", "0") ?? [];
+    Check(bits.SequenceEqual([160L]), "BITFIELD GET u8 0", string.Join(",", bits));
+
+    var deleted = rds.Execute<String?>("adv:hash", (rc, k) => rc.Execute<String>("HGETDEL", k, "FIELDS", 1, "del"), true);
+    Check(deleted == "value-del", "HGETDEL 返回旧值", deleted);
+    Check(!rds.GetDictionary<String>("adv:hash").ContainsKey("del"), "HGETDEL 删除字段");
+    var kept = rds.Execute<String?>("adv:hash", (rc, k) => rc.Execute<String>("HGETEX", k, "EX", 60, "FIELDS", 1, "ex"), true);
+    Check(kept == "value-ex", "HGETEX 返回字段值", kept);
+
+    var moved = rds.LMove<String>("adv:list:move:src", "adv:list:move:dst", "RIGHT", "LEFT");
+    Check(moved == "3", "LMOVE RIGHT->LEFT", moved);
+    var blmoved = rds.BLMove<String>("adv:list:move:src", "adv:list:move:dst", "LEFT", "RIGHT", 1);
+    Check(blmoved == "1", "BLMOVE LEFT->RIGHT", blmoved);
+    var movedList = rds.GetList<String>("adv:list:move:dst").ToArray();
+    Check(movedList.SequenceEqual(["3", "1"]), "LMOVE/BLMOVE 目标列表顺序", string.Join(",", movedList));
+
+    var lmpop = rds.LMPop<String>(["adv:list:multi:1", "adv:list:multi:2"], true, 2);
+    Check(
+        lmpop != null
+            && lmpop.Item1.EndsWith("adv:list:multi:2", StringComparison.Ordinal)
+            && (lmpop.Item2 ?? []).SequenceEqual(["m1", "m2"]),
+        "LMPOP 多键弹出",
+        lmpop == null ? "null" : $"{lmpop.Item1} => {string.Join(",", lmpop.Item2 ?? [])}");
+
+    var brpopRaw = rds.Execute<Object[]?>("adv:list:block:empty", (rc, k) => rc.Execute<Object[]>("BRPOP", $"{prefix}adv:list:block:empty", $"{prefix}adv:list:block:right", 1), true);
+    var brpop = brpopRaw != null && brpopRaw.Length == 2
+        ? new Tuple<String, String?>(RespString(brpopRaw[0]) ?? "", RespString(brpopRaw[1]))
+        : null;
+    Check(
+        brpop != null && brpop.Item1.EndsWith("adv:list:block:right", StringComparison.Ordinal) && brpop.Item2 == "rb",
+        "BRPOP 多键阻塞弹出",
+        brpop == null ? "null" : $"{brpop.Item1} => {brpop.Item2}");
+
+    var blpopRaw = rds.Execute<Object[]?>("adv:list:block:empty", (rc, k) => rc.Execute<Object[]>("BLPOP", $"{prefix}adv:list:block:empty", $"{prefix}adv:list:block:left", 1), true);
+    var blpop = blpopRaw != null && blpopRaw.Length == 2
+        ? new Tuple<String, String?>(RespString(blpopRaw[0]) ?? "", RespString(blpopRaw[1]))
+        : null;
+    Check(
+        blpop != null && blpop.Item1.EndsWith("adv:list:block:left", StringComparison.Ordinal) && blpop.Item2 == "la",
+        "BLPOP 多键阻塞弹出",
+        blpop == null ? "null" : $"{blpop.Item1} => {blpop.Item2}");
+
+    var smi = rds.SMIsMember("adv:set:1", "a", "x", "c") ?? [];
+    Check(smi.SequenceEqual([1, 0, 1]), "SMISMEMBER 成员存在性", string.Join(",", smi));
+    Check(rds.SInterCard(["adv:set:1", "adv:set:2"], 0) == 2, "SINTERCARD 交集基数", rds.SInterCard(["adv:set:1", "adv:set:2"], 0).ToString());
+
+    var zscores = rds.ZMScore("adv:zset:score", "a", "b") ?? [];
+    Check(zscores.SequenceEqual([1.0, 2.0]), "ZMSCORE 批量分数", string.Join(",", zscores));
+    var zrand = rds.ZRandMember<String>("adv:zset:rand", 2) ?? [];
+    Check(zrand.Length == 2 && zrand.All(item => item is "ra" or "rb" or "rc"), "ZRANDMEMBER 随机成员", string.Join(",", zrand));
+    Check(rds.GetSortedSet<String>("adv:zset:range").RangeStore("adv:zset:range:dest", 1.5, 3.0, true, false, 0, 10) == 2, "ZRANGESTORE 存储数量");
+    var stored = rds.GetSortedSet<String>("adv:zset:range:dest").RangeByScore(0.0, 10.0, 0, 10) ?? [];
+    Check(stored.SequenceEqual(["b", "c"]), "ZRANGESTORE 结果可读", string.Join(",", stored));
+
+    var zmpopRaw = rds.Execute<Object[]?>("adv:zset:pop:2", (rc, k) => rc.Execute<Object[]>("ZMPOP", 2, $"{prefix}adv:zset:pop:2", $"{prefix}adv:zset:pop:1", "MIN", "COUNT", 2), true);
+    var zmpopKey = zmpopRaw != null && zmpopRaw.Length >= 1 ? RespString(zmpopRaw[0]) : null;
+    var zmpopItems = new Dictionary<String, Double>();
+    if (zmpopRaw != null && zmpopRaw.Length >= 2 && zmpopRaw[1] is Object[] pairs)
+    {
+        foreach (var pair in pairs)
+        {
+            if (pair is not Object[] entry || entry.Length < 2) continue;
+            var member = RespString(entry[0]);
+            if (member == null) continue;
+            zmpopItems[member] = RespDouble(entry[1]);
+        }
+    }
+    var zmpopOk = zmpopKey != null
+        && zmpopKey.EndsWith("adv:zset:pop:1", StringComparison.Ordinal)
+        && zmpopItems.Count == 2
+        && zmpopItems.TryGetValue("p1", out var s1)
+        && zmpopItems.TryGetValue("p2", out var s2)
+        && Math.Abs(s1 - 1.0) < 1e-9
+        && Math.Abs(s2 - 2.0) < 1e-9;
+    Check(zmpopOk, "ZMPOP 弹出最小分成员", zmpopKey == null ? "null" : $"{zmpopKey} => {string.Join(",", zmpopItems.Select(kv => $"{kv.Key}:{kv.Value}"))}");
+
+    Check(rds.Wait(1, 10) == 0, "WAIT 单实例确认数", rds.Wait(1, 10).ToString());
+
+    var libs = rds.FunctionList("advlib") ?? [];
+    Check(libs.Length > 0, "FUNCTION LIST 可见对方函数库", libs.Length.ToString());
+    var echo = rds.Execute<String?>(rc => rc.Execute<String>("FCALL", "echo", 0, "hello-interop"));
+    Check(echo == "hello-interop", "FCALL 回声函数", echo);
+    var echoRo = rds.Execute<String?>(rc => rc.Execute<String>("FCALL_RO", "echo", 0, "hello-ro"));
+    Check(echoRo == "hello-ro", "FCALL_RO 回声函数", echoRo);
+    Check(rds.FunctionDelete("advlib") == "OK", "FUNCTION DELETE 删除函数库");
+    var libsAfter = rds.FunctionList("advlib") ?? [];
+    Check(libsAfter.Length == 0, "FUNCTION DELETE 后列表为空", libsAfter.Length.ToString());
+
+    WriteReceipt(rds);
 }
 
 void Push(FullRedis rds, int count)
