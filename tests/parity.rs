@@ -700,7 +700,7 @@ fn consume_raw_success_and_error_count() {
         })
         .unwrap();
     assert_eq!(list_len(&server, queue.ack_key()), 1);
-    let md5_key = format!("cr:Error:{:x}", md5::compute(b"plain-message"));
+    let md5_key = format!("cr:Error:{}", dhrust::sign::md5_hex("plain-message"));
     assert_eq!(
         raw_get(&server, &md5_key).as_deref(),
         Some(b"1".as_slice())

@@ -359,7 +359,7 @@ where
                 .and_then(|v| extract_message_id(v, &id_fields))
                 .unwrap_or_default();
             if msg_id.is_empty() {
-                msg_id = format!("{:x}", md5::compute(raw.as_bytes()));
+                msg_id = dhrust::sign::md5_hex(&raw);
             }
 
             let result = match value.as_ref() {
@@ -424,7 +424,7 @@ where
                     self.acknowledge(&[&raw])?;
                 }
                 Err(_) => {
-                    let msg_id = format!("{:x}", md5::compute(raw.as_bytes()));
+                    let msg_id = dhrust::sign::md5_hex(&raw);
                     let error_key = format!("{}:Error:{}", self.key, msg_id);
                     let count = bak.increment(&error_key, 1)?;
                     if count < 10 {

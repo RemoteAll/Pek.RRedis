@@ -202,6 +202,12 @@ cargo test --test live_redis -- --nocapture
 | C# | `demo/csharp/PekRRedisDemo`（引用 DH.NRedis 源码工程） | `dotnet run --project demo\csharp\PekRRedisDemo -- auto --config "<连接串>"` |
 | Rust | `examples/demo.rs` | `cargo run --example demo -- auto --config "<连接串>"` |
 
+若要按更苛刻口径做可重复回归，不再只看“核心路径跑过”，请直接执行严格门槛脚本与矩阵：[interop-strict.md](interop-strict.md)。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\interop-strict.ps1 -NoBuild
+```
+
 已实测的验证内容（2026-09-27）：
 
 - `selftest`：两侧编码器字节格式全绿（字符串/整数/布尔/时间/JSON，含互相解码）；

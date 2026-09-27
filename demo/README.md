@@ -9,6 +9,8 @@
 
 两者命令与样本**逐项对应**：一方 `write`，另一方 `verify` 即可交叉校验；每次 `verify` 会写下回执（`{prefix}{side}:receipt`），`report` 可查看双方回执。
 
+如果要按“严格门槛”重复验证，而不是手工挑几条命令实跑，请直接使用根目录的 [interop-strict.md](../interop-strict.md) 与 [scripts/interop-strict.ps1](../scripts/interop-strict.ps1)。
+
 ---
 
 ## 一、快速开始

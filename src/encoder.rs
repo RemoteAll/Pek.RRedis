@@ -332,8 +332,10 @@ pub mod datetime_text {
 }
 
 /// 格式化为 C# `DateTime.ToString("yyyy-MM-dd HH:mm:ss.fff")` 形式。
+///
+/// 实现位于 DH 基础库（`DH.RustBase` / crate `dhrust` 的 `times` 模块）。
 pub fn format_datetime(dt: &NaiveDateTime) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S.%3f").to_string()
+    dhrust::times::format_datetime_ms(dt)
 }
 
 /// 浮点格式化：与 .NET Core 的往返最短表示行为对齐（`0.1` 而非 `0.10000000000000001`）。
@@ -381,6 +383,9 @@ pub fn parse_bool(s: &str) -> Option<bool> {
 ///
 /// - `2026-09-26 10:00:00` / `2026-09-26 10:00:00.123`（C# 编码器输出）
 /// - `2026-09-26T10:00:00` / `2026-09-26T10:00:00.123456` / `2026-09-26T10:00:00Z` / 带偏移
+///
+/// 注意：与 `dhrust::times::parse_datetime` 的差异——带时区偏移的时间在此处换算为
+/// **本机时区**的朴素时间（对齐 C# `DateTime.Now` 语义），基础库版本则统一为 UTC 朴素时间。
 pub fn parse_datetime(s: &str) -> Result<NaiveDateTime> {
     let s = s.trim();
     if s.is_empty() {
