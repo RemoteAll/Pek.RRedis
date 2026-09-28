@@ -21,11 +21,13 @@ fn async_full_redis_roundtrips_basic_commands() {
     let redis = AsyncFullRedis::from_sync(sync);
 
     runtime().block_on(async {
-        assert!(redis
-            .redis()
-            .set("async:key".into(), "value".to_string(), 0)
-            .await
-            .unwrap());
+        assert!(
+            redis
+                .redis()
+                .set("async:key".into(), "value".to_string(), 0)
+                .await
+                .unwrap()
+        );
         let value: Option<String> = redis.redis().get("async:key".into()).await.unwrap();
         assert_eq!(value.as_deref(), Some("value"));
 
@@ -48,7 +50,10 @@ fn async_queue_and_reliable_queue_roundtrip() {
         assert_eq!(reliable.add("m1".to_string()).await.unwrap(), 1);
         let item = reliable.take_one(-1).await.unwrap();
         assert_eq!(item.as_deref(), Some("m1"));
-        assert_eq!(reliable.acknowledge(vec!["m1".to_string()]).await.unwrap(), 1);
+        assert_eq!(
+            reliable.acknowledge(vec!["m1".to_string()]).await.unwrap(),
+            1
+        );
     });
 }
 
@@ -88,7 +93,12 @@ fn async_hash_list_set_sortedset_roundtrip() {
         assert_eq!(list.get_all().await.unwrap(), vec![0, 10, 2]);
 
         let set = redis.get_set::<String>("s:tags");
-        assert_eq!(set.add(vec!["a".into(), "b".into(), "a".into()]).await.unwrap(), 2);
+        assert_eq!(
+            set.add(vec!["a".into(), "b".into(), "a".into()])
+                .await
+                .unwrap(),
+            2
+        );
         assert!(set.contains("a".to_string()).await.unwrap());
         assert_eq!(set.remove(vec!["a".to_string()]).await.unwrap(), 1);
 
@@ -100,7 +110,10 @@ fn async_hash_list_set_sortedset_roundtrip() {
         let all = zset.range_with_scores(0, -1).await.unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].0, "m2");
-        assert_eq!(zset.range_by_score(1.0, 3.0, 0, 10).await.unwrap(), vec!["m1"]);
+        assert_eq!(
+            zset.range_by_score(1.0, 3.0, 0, 10).await.unwrap(),
+            vec!["m1"]
+        );
     });
 }
 
@@ -111,7 +124,11 @@ fn async_hyperloglog_and_stack_roundtrip() {
 
     runtime().block_on(async {
         let hll = redis.get_hyper_log_log("hll:pv");
-        assert!(hll.add(vec!["a".into(), "b".into(), "c".into(), "a".into()]).await.unwrap());
+        assert!(
+            hll.add(vec!["a".into(), "b".into(), "c".into(), "a".into()])
+                .await
+                .unwrap()
+        );
         assert_eq!(hll.count().await.unwrap(), 3);
 
         let stack = redis.get_stack::<i64>("st");
@@ -162,8 +179,18 @@ fn async_pubsub_roundtrip() {
 
         assert!(published > 0);
         assert!(ready.load(Ordering::SeqCst));
-        assert_eq!(received.lock().unwrap().first().map(|s| s.as_str()), Some("hello"));
-        assert_eq!(pubsub.pubsub_numsub(vec!["async:chan".to_string()]).await.unwrap()[0].1, 0);
+        assert_eq!(
+            received.lock().unwrap().first().map(|s| s.as_str()),
+            Some("hello")
+        );
+        assert_eq!(
+            pubsub
+                .pubsub_numsub(vec!["async:chan".to_string()])
+                .await
+                .unwrap()[0]
+                .1,
+            0
+        );
     });
 }
 
@@ -214,7 +241,10 @@ fn async_pattern_and_shard_pubsub_roundtrip() {
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(50));
             let pattern_count = pubsub.publish("pattern".to_string()).await.unwrap_or(0);
-            let shard_count = shard_pubsub.spublish("shard".to_string()).await.unwrap_or(0);
+            let shard_count = shard_pubsub
+                .spublish("shard".to_string())
+                .await
+                .unwrap_or(0);
             if pattern_count > 0 && shard_count > 0 {
                 break;
             }
@@ -226,8 +256,14 @@ fn async_pattern_and_shard_pubsub_roundtrip() {
         pattern_handle.await.unwrap().unwrap();
         shard_handle.await.unwrap().unwrap();
 
-        assert_eq!(pattern_received.lock().unwrap().first().map(|s| s.as_str()), Some("async:*|async:chan|pattern"));
-        assert_eq!(shard_received.lock().unwrap().first().map(|s| s.as_str()), Some("async:shard|shard"));
+        assert_eq!(
+            pattern_received.lock().unwrap().first().map(|s| s.as_str()),
+            Some("async:*|async:chan|pattern")
+        );
+        assert_eq!(
+            shard_received.lock().unwrap().first().map(|s| s.as_str()),
+            Some("async:shard|shard")
+        );
         assert_eq!(pubsub.pubsub_numpat().await.unwrap(), 0);
     });
 }
@@ -338,7 +374,11 @@ fn async_stream_management_surface_roundtrip() {
         assert!(stream.group_set_id("g1".into(), "0".into()).await.unwrap());
         assert_eq!(stream.get_groups().await.unwrap()[0].name, "g1");
 
-        let id = stream.add("hello".to_string(), None).await.unwrap().unwrap();
+        let id = stream
+            .add("hello".to_string(), None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(stream.get_info().await.unwrap().unwrap().length, 1);
 
         let range = stream.range(None, None, 10).await.unwrap();
@@ -407,7 +447,13 @@ fn async_full_redis_helper_surface_roundtrip() {
                 .unwrap(),
             3
         );
-        assert_eq!(redis.lpos("list:a".into(), "b".into(), 0, 1, 0).await.unwrap(), vec![1]);
+        assert_eq!(
+            redis
+                .lpos("list:a".into(), "b".into(), 0, 1, 0)
+                .await
+                .unwrap(),
+            vec![1]
+        );
 
         let moved: Option<String> = redis
             .lmove("list:a".into(), "list:b".into(), false, true)
@@ -460,11 +506,21 @@ fn async_full_redis_helper_surface_roundtrip() {
         zset.add("m2".to_string(), 2.0).await.unwrap();
         assert_eq!(
             redis
-                .zmscore("z:helper".into(), vec!["m1".into(), "m2".into(), "m3".into()])
+                .zmscore(
+                    "z:helper".into(),
+                    vec!["m1".into(), "m2".into(), "m3".into()]
+                )
                 .await
                 .unwrap(),
             vec![Some(1.0), Some(2.0), None]
         );
-        assert_eq!(redis.zrand_member_with_scores::<String>("z:helper".into(), 2).await.unwrap().len(), 2);
+        assert_eq!(
+            redis
+                .zrand_member_with_scores::<String>("z:helper".into(), 2)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     });
 }

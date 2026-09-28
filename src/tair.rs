@@ -161,7 +161,11 @@ impl FullRedis {
     }
 
     /// TairHash：批量读取字段（`EXHMGET key field...`，对应 C# `ExHMGet<T>`）。
-    pub fn ex_hmget<V: FromRedisPayload>(&self, key: &str, fields: &[&str]) -> Result<Vec<Option<V>>> {
+    pub fn ex_hmget<V: FromRedisPayload>(
+        &self,
+        key: &str,
+        fields: &[&str],
+    ) -> Result<Vec<Option<V>>> {
         let key = self.get_key(key);
         let mut argv: Vec<Vec<u8>> = Vec::with_capacity(fields.len() + 2);
         argv.push(b"EXHMGET".to_vec());
@@ -175,7 +179,13 @@ impl FullRedis {
             .into_array()
             .unwrap_or_default()
             .into_iter()
-            .map(|v| if v.is_null() { None } else { decode_bytes(&v.as_bytes().unwrap_or_default()) })
+            .map(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    decode_bytes(&v.as_bytes().unwrap_or_default())
+                }
+            })
             .collect())
     }
 
@@ -267,7 +277,10 @@ impl FullRedis {
     /// TairHash：字段数量（`EXHLEN key`，对应 C# `ExHLen`）。
     pub fn ex_hlen(&self, key: &str) -> Result<i64> {
         let key = self.get_key(key);
-        Ok(int_or(self.redis().execute(&[b"EXHLEN", key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis().execute(&[b"EXHLEN", key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// TairHash：删除字段（`EXHDEL key field...`，对应 C# `ExHDel`）。

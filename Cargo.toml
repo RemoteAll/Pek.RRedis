@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-# DH 基础库（DH.RustBase）：MD5 摘要、时间文本格式化等基础方法
+# DH 基础库（DH.RustBase）：MD5 摘要、时间文本格式化、定时器/调度（threading）等基础能力
 dhrust = { path = "../DH.RustBase" }
 rand = "0.8"
 rcgen = "0.13"

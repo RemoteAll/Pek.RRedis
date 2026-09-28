@@ -28,8 +28,8 @@ use crate::queues::{
     RedisReliableQueue, RedisStream, StreamInfo,
 };
 use crate::redis::{Redis, ServerType};
-use crate::set::RedisSet;
 use crate::services::RedLock;
+use crate::set::RedisSet;
 use crate::sortedset::RedisSortedSet;
 use crate::stack::RedisStack;
 use crate::{FromRedisPayload, ToRedisPayload};
@@ -222,7 +222,8 @@ impl AsyncRedis {
 
     /// 设置过期时间。
     pub async fn set_expire(&self, key: String, seconds: i64) -> Result<bool> {
-        self.with_sync(move |redis| redis.set_expire(&key, seconds)).await
+        self.with_sync(move |redis| redis.set_expire(&key, seconds))
+            .await
     }
 
     /// 获取过期时间。
@@ -289,17 +290,25 @@ impl AsyncRedis {
 
     /// 键内存占用。
     pub async fn memory_usage(&self, key: String, samples: i32) -> Result<Option<i64>> {
-        self.with_sync(move |redis| redis.memory_usage(&key, samples)).await
+        self.with_sync(move |redis| redis.memory_usage(&key, samples))
+            .await
     }
 
     /// 对象内部编码。
     pub async fn object_encoding(&self, key: String) -> Result<Option<String>> {
-        self.with_sync(move |redis| redis.object_encoding(&key)).await
+        self.with_sync(move |redis| redis.object_encoding(&key))
+            .await
     }
 
     /// 分页扫描。
-    pub async fn scan(&self, cursor: u64, pattern: String, count: usize) -> Result<(u64, Vec<String>)> {
-        self.with_sync(move |redis| redis.scan(cursor, &pattern, count)).await
+    pub async fn scan(
+        &self,
+        cursor: u64,
+        pattern: String,
+        count: usize,
+    ) -> Result<(u64, Vec<String>)> {
+        self.with_sync(move |redis| redis.scan(cursor, &pattern, count))
+            .await
     }
 
     /// 获取原始二进制值。
@@ -326,7 +335,8 @@ impl AsyncRedis {
     where
         V: FromRedisPayload + ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.replace(&key, value)).await
+        self.with_sync(move |redis| redis.replace(&key, value))
+            .await
     }
 
     /// 设置新值并返回旧值。
@@ -340,7 +350,8 @@ impl AsyncRedis {
 
     /// 追加字符串。
     pub async fn append(&self, key: String, value: String) -> Result<i64> {
-        self.with_sync(move |redis| redis.append(&key, &value)).await
+        self.with_sync(move |redis| redis.append(&key, &value))
+            .await
     }
 
     /// 字符串长度。
@@ -350,7 +361,8 @@ impl AsyncRedis {
 
     /// 字符串区间读取。
     pub async fn get_range(&self, key: String, start: i64, end: i64) -> Result<String> {
-        self.with_sync(move |redis| redis.get_range(&key, start, end)).await
+        self.with_sync(move |redis| redis.get_range(&key, start, end))
+            .await
     }
 
     /// 字符串区间覆盖。
@@ -361,26 +373,35 @@ impl AsyncRedis {
 
     /// 设置位。
     pub async fn set_bit(&self, key: String, offset: u64, value: u8) -> Result<i64> {
-        self.with_sync(move |redis| redis.set_bit(&key, offset, value)).await
+        self.with_sync(move |redis| redis.set_bit(&key, offset, value))
+            .await
     }
 
     /// 读取位。
     pub async fn get_bit(&self, key: String, offset: u64) -> Result<i64> {
-        self.with_sync(move |redis| redis.get_bit(&key, offset)).await
+        self.with_sync(move |redis| redis.get_bit(&key, offset))
+            .await
     }
 
     /// 位计数。
     pub async fn bit_count(&self, key: String, start: i64, end: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.bit_count(&key, start, end)).await
+        self.with_sync(move |redis| redis.bit_count(&key, start, end))
+            .await
     }
 
     /// 位位置。
     pub async fn bit_pos(&self, key: String, bit: i32, start: i64, end: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.bit_pos(&key, bit, start, end)).await
+        self.with_sync(move |redis| redis.bit_pos(&key, bit, start, end))
+            .await
     }
 
     /// 多键位运算。
-    pub async fn bit_op(&self, operation: String, dest_key: String, keys: Vec<String>) -> Result<i64> {
+    pub async fn bit_op(
+        &self,
+        operation: String,
+        dest_key: String,
+        keys: Vec<String>,
+    ) -> Result<i64> {
         self.with_sync(move |redis| {
             let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
             redis.bit_op(&operation, &dest_key, &refs)
@@ -390,7 +411,8 @@ impl AsyncRedis {
 
     /// 整数自增。
     pub async fn increment(&self, key: String, delta: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.increment(&key, delta)).await
+        self.with_sync(move |redis| redis.increment(&key, delta))
+            .await
     }
 
     /// 浮点自增。
@@ -401,7 +423,8 @@ impl AsyncRedis {
 
     /// 整数自减。
     pub async fn decrement(&self, key: String, delta: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.decrement(&key, delta)).await
+        self.with_sync(move |redis| redis.decrement(&key, delta))
+            .await
     }
 
     /// 服务器信息。
@@ -441,12 +464,14 @@ impl AsyncRedis {
 
     /// 加载脚本缓存。
     pub async fn script_load(&self, script: String) -> Result<String> {
-        self.with_sync(move |redis| redis.script_load(&script)).await
+        self.with_sync(move |redis| redis.script_load(&script))
+            .await
     }
 
     /// 判断脚本缓存是否存在。
     pub async fn script_exists(&self, sha1: String) -> Result<bool> {
-        self.with_sync(move |redis| redis.script_exists(&sha1)).await
+        self.with_sync(move |redis| redis.script_exists(&sha1))
+            .await
     }
 
     /// 清空脚本缓存。
@@ -470,7 +495,12 @@ impl AsyncRedis {
     }
 
     /// 执行 Lua 脚本并解码返回值。
-    pub async fn eval<V>(&self, script: String, keys: Vec<String>, args: Vec<String>) -> Result<Option<V>>
+    pub async fn eval<V>(
+        &self,
+        script: String,
+        keys: Vec<String>,
+        args: Vec<String>,
+    ) -> Result<Option<V>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -542,7 +572,8 @@ impl AsyncFullRedis {
 
     /// 搜索。
     pub async fn search(&self, pattern: String, count: usize) -> Result<Vec<String>> {
-        self.with_sync(move |redis| redis.search(&pattern, count)).await
+        self.with_sync(move |redis| redis.search(&pattern, count))
+            .await
     }
 
     /// 分页搜索。
@@ -558,7 +589,8 @@ impl AsyncFullRedis {
 
     /// 按模式删除。
     pub async fn remove_pattern(&self, pattern: String) -> Result<i64> {
-        self.with_sync(move |redis| redis.remove_pattern(&pattern)).await
+        self.with_sync(move |redis| redis.remove_pattern(&pattern))
+            .await
     }
 
     /// 分布式锁。
@@ -646,7 +678,12 @@ impl AsyncFullRedis {
     }
 
     /// 执行 Lua 脚本。
-    pub async fn eval<V>(&self, script: String, keys: Vec<String>, args: Vec<String>) -> Result<Option<V>>
+    pub async fn eval<V>(
+        &self,
+        script: String,
+        keys: Vec<String>,
+        args: Vec<String>,
+    ) -> Result<Option<V>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -714,7 +751,8 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.replace(&key, value)).await
+        self.with_sync(move |redis| redis.replace(&key, value))
+            .await
     }
 
     /// 读取键值。
@@ -742,7 +780,8 @@ impl AsyncFullRedis {
 
     /// 设置过期时间。
     pub async fn set_expire(&self, key: String, seconds: i64) -> Result<bool> {
-        self.with_sync(move |redis| redis.set_expire(&key, seconds)).await
+        self.with_sync(move |redis| redis.set_expire(&key, seconds))
+            .await
     }
 
     /// 获取过期时间。
@@ -761,7 +800,8 @@ impl AsyncFullRedis {
 
     /// 追加字符串。
     pub async fn append(&self, key: String, value: String) -> Result<i64> {
-        self.with_sync(move |redis| redis.append(&key, &value)).await
+        self.with_sync(move |redis| redis.append(&key, &value))
+            .await
     }
 
     /// 字符串长度。
@@ -771,7 +811,8 @@ impl AsyncFullRedis {
 
     /// 字符串区间读取。
     pub async fn get_range(&self, key: String, start: i64, end: i64) -> Result<String> {
-        self.with_sync(move |redis| redis.get_range(&key, start, end)).await
+        self.with_sync(move |redis| redis.get_range(&key, start, end))
+            .await
     }
 
     /// 字符串区间覆盖。
@@ -782,7 +823,8 @@ impl AsyncFullRedis {
 
     /// 整数自增。
     pub async fn increment(&self, key: String, delta: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.increment(&key, delta)).await
+        self.with_sync(move |redis| redis.increment(&key, delta))
+            .await
     }
 
     /// 浮点自增。
@@ -793,7 +835,8 @@ impl AsyncFullRedis {
 
     /// 整数自减。
     pub async fn decrement(&self, key: String, delta: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.decrement(&key, delta)).await
+        self.with_sync(move |redis| redis.decrement(&key, delta))
+            .await
     }
 
     /// 键类型。
@@ -803,7 +846,8 @@ impl AsyncFullRedis {
 
     /// 重命名键。
     pub async fn rename(&self, key: String, new_key: String) -> Result<bool> {
-        self.with_sync(move |redis| redis.rename(&key, &new_key)).await
+        self.with_sync(move |redis| redis.rename(&key, &new_key))
+            .await
     }
 
     /// 键数量。
@@ -816,7 +860,8 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.get_ex(&key, expire)).await
+        self.with_sync(move |redis| redis.get_ex(&key, expire))
+            .await
     }
 
     /// 秒级绝对过期时间。
@@ -831,7 +876,8 @@ impl AsyncFullRedis {
 
     /// 对象空闲时间。
     pub async fn object_idle_time(&self, key: String) -> Result<Option<i64>> {
-        self.with_sync(move |redis| redis.object_idle_time(&key)).await
+        self.with_sync(move |redis| redis.object_idle_time(&key))
+            .await
     }
 
     /// 对象访问频率。
@@ -841,7 +887,8 @@ impl AsyncFullRedis {
 
     /// 等待副本确认。
     pub async fn wait(&self, num_replicas: i32, timeout_ms: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.wait(num_replicas, timeout_ms)).await
+        self.with_sync(move |redis| redis.wait(num_replicas, timeout_ms))
+            .await
     }
 
     /// 交换两个库。
@@ -866,7 +913,8 @@ impl AsyncFullRedis {
 
     /// 延迟历史。
     pub async fn latency_history(&self, event: String) -> Result<Vec<(i64, i64)>> {
-        self.with_sync(move |redis| redis.latency_history(&event)).await
+        self.with_sync(move |redis| redis.latency_history(&event))
+            .await
     }
 
     /// 最新延迟统计。
@@ -895,7 +943,10 @@ impl AsyncFullRedis {
     }
 
     /// 列出函数库。
-    pub async fn function_list(&self, library_name: Option<String>) -> Result<Vec<crate::RespValue>> {
+    pub async fn function_list(
+        &self,
+        library_name: Option<String>,
+    ) -> Result<Vec<crate::RespValue>> {
         self.with_sync(move |redis| redis.function_list(library_name.as_deref()))
             .await
     }
@@ -913,26 +964,35 @@ impl AsyncFullRedis {
 
     /// 设置位。
     pub async fn set_bit(&self, key: String, offset: u64, value: u8) -> Result<i64> {
-        self.with_sync(move |redis| redis.set_bit(&key, offset, value)).await
+        self.with_sync(move |redis| redis.set_bit(&key, offset, value))
+            .await
     }
 
     /// 读取位。
     pub async fn get_bit(&self, key: String, offset: u64) -> Result<i64> {
-        self.with_sync(move |redis| redis.get_bit(&key, offset)).await
+        self.with_sync(move |redis| redis.get_bit(&key, offset))
+            .await
     }
 
     /// 位计数。
     pub async fn bit_count(&self, key: String, start: i64, end: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.bit_count(&key, start, end)).await
+        self.with_sync(move |redis| redis.bit_count(&key, start, end))
+            .await
     }
 
     /// 位位置。
     pub async fn bit_pos(&self, key: String, bit: i32, start: i64, end: i64) -> Result<i64> {
-        self.with_sync(move |redis| redis.bit_pos(&key, bit, start, end)).await
+        self.with_sync(move |redis| redis.bit_pos(&key, bit, start, end))
+            .await
     }
 
     /// 多键位运算。
-    pub async fn bit_op(&self, operation: String, dest_key: String, keys: Vec<String>) -> Result<i64> {
+    pub async fn bit_op(
+        &self,
+        operation: String,
+        dest_key: String,
+        keys: Vec<String>,
+    ) -> Result<i64> {
         self.with_sync(move |redis| {
             let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
             redis.bit_op(&operation, &dest_key, &refs)
@@ -981,12 +1041,14 @@ impl AsyncFullRedis {
 
     /// 键内存占用。
     pub async fn memory_usage(&self, key: String, samples: i32) -> Result<Option<i64>> {
-        self.with_sync(move |redis| redis.memory_usage(&key, samples)).await
+        self.with_sync(move |redis| redis.memory_usage(&key, samples))
+            .await
     }
 
     /// 对象内部编码。
     pub async fn object_encoding(&self, key: String) -> Result<Option<String>> {
-        self.with_sync(move |redis| redis.object_encoding(&key)).await
+        self.with_sync(move |redis| redis.object_encoding(&key))
+            .await
     }
 
     /// 随机键。
@@ -999,7 +1061,8 @@ impl AsyncFullRedis {
     where
         V: ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.rpush(&key, &values)).await
+        self.with_sync(move |redis| redis.rpush(&key, &values))
+            .await
     }
 
     /// 列表头部插入。
@@ -1007,7 +1070,8 @@ impl AsyncFullRedis {
     where
         V: ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.lpush(&key, &values)).await
+        self.with_sync(move |redis| redis.lpush(&key, &values))
+            .await
     }
 
     /// 列表右弹。
@@ -1023,7 +1087,8 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.brpop(&key, timeout_seconds)).await
+        self.with_sync(move |redis| redis.brpop(&key, timeout_seconds))
+            .await
     }
 
     /// 列表左弹。
@@ -1039,7 +1104,8 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.blpop(&key, timeout_seconds)).await
+        self.with_sync(move |redis| redis.blpop(&key, timeout_seconds))
+            .await
     }
 
     /// 右弹左推。
@@ -1083,7 +1149,8 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.sismember(&key, &member)).await
+        self.with_sync(move |redis| redis.sismember(&key, &member))
+            .await
     }
 
     /// 集合移动。
@@ -1100,7 +1167,8 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.srandmember(&key, count)).await
+        self.with_sync(move |redis| redis.srandmember(&key, count))
+            .await
     }
 
     /// 集合随机弹出。
@@ -1116,7 +1184,8 @@ impl AsyncFullRedis {
     where
         V: ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.sadd(&key, &members)).await
+        self.with_sync(move |redis| redis.sadd(&key, &members))
+            .await
     }
 
     /// 集合删除。
@@ -1124,7 +1193,8 @@ impl AsyncFullRedis {
     where
         V: ToRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.srem(&key, &members)).await
+        self.with_sync(move |redis| redis.srem(&key, &members))
+            .await
     }
 
     /// 跨键移动元素。
@@ -1178,7 +1248,11 @@ impl AsyncFullRedis {
     }
 
     /// 多键阻塞右弹。
-    pub async fn brpop_multi<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V)>>
+    pub async fn brpop_multi<V>(
+        &self,
+        keys: Vec<String>,
+        timeout_seconds: i64,
+    ) -> Result<Option<(String, V)>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -1190,7 +1264,11 @@ impl AsyncFullRedis {
     }
 
     /// 多键阻塞左弹。
-    pub async fn blpop_multi<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V)>>
+    pub async fn blpop_multi<V>(
+        &self,
+        keys: Vec<String>,
+        timeout_seconds: i64,
+    ) -> Result<Option<(String, V)>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -1246,15 +1324,21 @@ impl AsyncFullRedis {
     where
         V: FromRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.zrand_member(&key, count)).await
+        self.with_sync(move |redis| redis.zrand_member(&key, count))
+            .await
     }
 
     /// 随机有序集合成员及分数。
-    pub async fn zrand_member_with_scores<V>(&self, key: String, count: i64) -> Result<Vec<(V, f64)>>
+    pub async fn zrand_member_with_scores<V>(
+        &self,
+        key: String,
+        count: i64,
+    ) -> Result<Vec<(V, f64)>>
     where
         V: FromRedisPayload + Send + 'static,
     {
-        self.with_sync(move |redis| redis.zrand_member_with_scores(&key, count)).await
+        self.with_sync(move |redis| redis.zrand_member_with_scores(&key, count))
+            .await
     }
 
     /// 多键弹出有序集合元素。
@@ -1276,7 +1360,11 @@ impl AsyncFullRedis {
     }
 
     /// 多键阻塞弹出最小分成员。
-    pub async fn bzpopmin<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V, f64)>>
+    pub async fn bzpopmin<V>(
+        &self,
+        keys: Vec<String>,
+        timeout_seconds: i64,
+    ) -> Result<Option<(String, V, f64)>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -1288,7 +1376,11 @@ impl AsyncFullRedis {
     }
 
     /// 多键阻塞弹出最大分成员。
-    pub async fn bzpopmax<V>(&self, keys: Vec<String>, timeout_seconds: i64) -> Result<Option<(String, V, f64)>>
+    pub async fn bzpopmax<V>(
+        &self,
+        keys: Vec<String>,
+        timeout_seconds: i64,
+    ) -> Result<Option<(String, V, f64)>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -1301,11 +1393,17 @@ impl AsyncFullRedis {
 
     /// 设置复制跟随。
     pub async fn replica_of(&self, host: Option<String>, port: u16) -> Result<()> {
-        self.with_sync(move |redis| redis.replica_of(host.as_deref(), port)).await
+        self.with_sync(move |redis| redis.replica_of(host.as_deref(), port))
+            .await
     }
 
     /// 调用已加载函数。
-    pub async fn fcall<V>(&self, function: String, keys: Vec<String>, args: Vec<String>) -> Result<Option<V>>
+    pub async fn fcall<V>(
+        &self,
+        function: String,
+        keys: Vec<String>,
+        args: Vec<String>,
+    ) -> Result<Option<V>>
     where
         V: FromRedisPayload + Send + 'static,
     {
@@ -1345,7 +1443,8 @@ impl AsyncFullRedis {
     ) -> Result<Option<RedLock>> {
         let redis = self.inner.clone();
         spawn_result(move || {
-            let others: Vec<FullRedis> = other_instances.into_iter().map(|item| item.inner).collect();
+            let others: Vec<FullRedis> =
+                other_instances.into_iter().map(|item| item.inner).collect();
             redis.acquire_red_lock(&others, &key, ms_timeout, ms_expire)
         })
         .await
@@ -1547,7 +1646,10 @@ where
         V: FromRedisPayload,
         K: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |hash| hash.hgetex(&field, expire_seconds)).await
+        spawn_locked(self.inner.clone(), move |hash| {
+            hash.hgetex(&field, expire_seconds)
+        })
+        .await
     }
 
     pub async fn get_all(&self) -> Result<Vec<(K, Option<V>)>>
@@ -1595,7 +1697,10 @@ where
         V: FromRedisPayload,
         K: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |hash| hash.incr_by_float(&field, delta)).await
+        spawn_locked(self.inner.clone(), move |hash| {
+            hash.incr_by_float(&field, delta)
+        })
+        .await
     }
 
     pub async fn set_nx(&self, field: K, value: V) -> Result<i64>
@@ -1619,15 +1724,26 @@ where
         V: FromRedisPayload,
         K: FromRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |hash| hash.random_field(count, with_values)).await
+        spawn_locked(self.inner.clone(), move |hash| {
+            hash.random_field(count, with_values)
+        })
+        .await
     }
 
-    pub async fn scan(&self, cursor: u64, pattern: String, count: usize) -> Result<(u64, Vec<(K, Option<V>)>)>
+    pub async fn scan(
+        &self,
+        cursor: u64,
+        pattern: String,
+        count: usize,
+    ) -> Result<(u64, Vec<(K, Option<V>)>)>
     where
         V: FromRedisPayload,
         K: FromRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |hash| hash.scan(cursor, &pattern, count)).await
+        spawn_locked(self.inner.clone(), move |hash| {
+            hash.scan(cursor, &pattern, count)
+        })
+        .await
     }
 
     pub async fn search(&self, pattern: String, count: usize) -> Result<Vec<(K, V)>>
@@ -1702,7 +1818,10 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.push_front_many(&values)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.push_front_many(&values)
+        })
+        .await
     }
 
     pub async fn pop_back(&self) -> Result<Option<V>>
@@ -1723,14 +1842,20 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.pop_back_blocking(timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.pop_back_blocking(timeout_seconds)
+        })
+        .await
     }
 
     pub async fn pop_front_blocking(&self, timeout_seconds: i64) -> Result<Option<V>>
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.pop_front_blocking(timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.pop_front_blocking(timeout_seconds)
+        })
+        .await
     }
 
     pub async fn get(&self, index: i64) -> Result<Option<V>>
@@ -1772,21 +1897,30 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.brpoplpush(&destination, timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.brpoplpush(&destination, timeout_seconds)
+        })
+        .await
     }
 
     pub async fn insert_before(&self, pivot: V, value: V) -> Result<i64>
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.insert_before(&pivot, &value)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.insert_before(&pivot, &value)
+        })
+        .await
     }
 
     pub async fn insert_after(&self, pivot: V, value: V) -> Result<i64>
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.insert_after(&pivot, &value)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.insert_after(&pivot, &value)
+        })
+        .await
     }
 
     pub async fn remove(&self, count: i64, value: V) -> Result<i64>
@@ -1828,7 +1962,10 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |list| list.insert_at(index, &value)).await
+        spawn_locked(self.inner.clone(), move |list| {
+            list.insert_at(index, &value)
+        })
+        .await
     }
 
     pub async fn remove_at(&self, index: i64) -> Result<i64>
@@ -1937,7 +2074,10 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |set| set.move_to(&destination, &member)).await
+        spawn_locked(self.inner.clone(), move |set| {
+            set.move_to(&destination, &member)
+        })
+        .await
     }
 
     pub async fn diff(&self, keys: Vec<String>) -> Result<Vec<V>>
@@ -2105,14 +2245,26 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |set| set.range_with_scores(start, stop)).await
+        spawn_locked(self.inner.clone(), move |set| {
+            set.range_with_scores(start, stop)
+        })
+        .await
     }
 
-    pub async fn range_by_score(&self, min: f64, max: f64, offset: i64, count: i64) -> Result<Vec<V>>
+    pub async fn range_by_score(
+        &self,
+        min: f64,
+        max: f64,
+        offset: i64,
+        count: i64,
+    ) -> Result<Vec<V>>
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |set| set.range_by_score(min, max, offset, count)).await
+        spawn_locked(self.inner.clone(), move |set| {
+            set.range_by_score(min, max, offset, count)
+        })
+        .await
     }
 
     pub async fn range_by_score_with_scores(
@@ -2163,14 +2315,20 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |set| set.remove_range_by_rank(start, stop)).await
+        spawn_locked(self.inner.clone(), move |set| {
+            set.remove_range_by_rank(start, stop)
+        })
+        .await
     }
 
     pub async fn remove_range_by_score(&self, min: f64, max: f64) -> Result<i64>
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |set| set.remove_range_by_score(min, max)).await
+        spawn_locked(self.inner.clone(), move |set| {
+            set.remove_range_by_score(min, max)
+        })
+        .await
     }
 
     pub async fn scan_all(&self, pattern: String, count: usize) -> Result<Vec<(V, f64)>>
@@ -2184,7 +2342,10 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |set| set.add_with_options(&options, &items)).await
+        spawn_locked(self.inner.clone(), move |set| {
+            set.add_with_options(&options, &items)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2273,7 +2434,12 @@ where
     {
         spawn_locked(self.inner.clone(), move |set| {
             let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
-            set.union_store(&destination, &refs, weights.as_deref(), aggregate.as_deref())
+            set.union_store(
+                &destination,
+                &refs,
+                weights.as_deref(),
+                aggregate.as_deref(),
+            )
         })
         .await
     }
@@ -2322,7 +2488,12 @@ where
     {
         spawn_locked(self.inner.clone(), move |set| {
             let refs: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
-            set.inter_store(&destination, &refs, weights.as_deref(), aggregate.as_deref())
+            set.inter_store(
+                &destination,
+                &refs,
+                weights.as_deref(),
+                aggregate.as_deref(),
+            )
         })
         .await
     }
@@ -2384,7 +2555,10 @@ where
     where
         V: FromRedisPayload + ToRedisPayload,
     {
-        spawn_locked(self.inner.clone(), move |stack| stack.take_one(timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |stack| {
+            stack.take_one(timeout_seconds)
+        })
+        .await
     }
 
     pub async fn take(&self, count: usize) -> Result<Vec<V>>
@@ -2417,15 +2591,26 @@ impl AsyncRedisGeo {
     }
 
     pub async fn add(&self, name: String, longitude: f64, latitude: f64) -> Result<i64> {
-        spawn_locked(self.inner.clone(), move |geo| geo.add(&name, longitude, latitude)).await
+        spawn_locked(self.inner.clone(), move |geo| {
+            geo.add(&name, longitude, latitude)
+        })
+        .await
     }
 
     pub async fn add_items(&self, items: Vec<GeoMember>) -> Result<i64> {
         spawn_locked(self.inner.clone(), move |geo| geo.add_items(&items)).await
     }
 
-    pub async fn distance(&self, from: String, to: String, unit: Option<String>) -> Result<Option<f64>> {
-        spawn_locked(self.inner.clone(), move |geo| geo.distance(&from, &to, unit.as_deref())).await
+    pub async fn distance(
+        &self,
+        from: String,
+        to: String,
+        unit: Option<String>,
+    ) -> Result<Option<f64>> {
+        spawn_locked(self.inner.clone(), move |geo| {
+            geo.distance(&from, &to, unit.as_deref())
+        })
+        .await
     }
 
     pub async fn position(&self, members: Vec<String>) -> Result<Vec<Option<(f64, f64)>>> {
@@ -2483,7 +2668,15 @@ impl AsyncRedisGeo {
         ascending: bool,
     ) -> Result<Vec<GeoMember>> {
         spawn_locked(self.inner.clone(), move |geo| {
-            geo.search(member.as_deref(), longitude, latitude, radius, &unit, count, ascending)
+            geo.search(
+                member.as_deref(),
+                longitude,
+                latitude,
+                radius,
+                &unit,
+                count,
+                ascending,
+            )
         })
         .await
     }
@@ -2694,7 +2887,10 @@ where
     }
 
     pub async fn take_one(&self, timeout_seconds: i64) -> Result<Option<V>> {
-        spawn_locked(self.inner.clone(), move |queue| queue.take_one(timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |queue| {
+            queue.take_one(timeout_seconds)
+        })
+        .await
     }
 
     pub async fn take(&self, count: usize) -> Result<Vec<V>> {
@@ -2732,14 +2928,20 @@ where
 
     pub async fn publish(&self, messages: Vec<(String, V)>, expire_seconds: i64) -> Result<i64> {
         spawn_locked(self.inner.clone(), move |queue| {
-            let borrowed: Vec<(&str, &V)> = messages.iter().map(|(key, value)| (key.as_str(), value)).collect();
+            let borrowed: Vec<(&str, &V)> = messages
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect();
             queue.publish(&borrowed, expire_seconds)
         })
         .await
     }
 
     pub async fn take_one(&self, timeout_seconds: i64) -> Result<Option<V>> {
-        spawn_locked(self.inner.clone(), move |queue| queue.take_one(timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |queue| {
+            queue.take_one(timeout_seconds)
+        })
+        .await
     }
 
     pub async fn take(&self, count: usize) -> Result<Vec<V>> {
@@ -2763,7 +2965,10 @@ where
     }
 
     pub async fn add_delay(&self, value: V, delay_seconds: i64) -> Result<i64> {
-        spawn_locked(self.inner.clone(), move |queue| queue.add_delay(&value, delay_seconds)).await
+        spawn_locked(self.inner.clone(), move |queue| {
+            queue.add_delay(&value, delay_seconds)
+        })
+        .await
     }
 }
 
@@ -2788,7 +2993,10 @@ where
     }
 
     pub async fn add(&self, value: V, delay_seconds: i64) -> Result<i64> {
-        spawn_locked(self.inner.clone(), move |queue| queue.add(&value, delay_seconds)).await
+        spawn_locked(self.inner.clone(), move |queue| {
+            queue.add(&value, delay_seconds)
+        })
+        .await
     }
 
     pub async fn add_many(&self, values: Vec<V>) -> Result<i64> {
@@ -2804,7 +3012,10 @@ where
     }
 
     pub async fn take_one(&self, timeout_seconds: i64) -> Result<Option<V>> {
-        spawn_locked(self.inner.clone(), move |queue| queue.take_one(timeout_seconds)).await
+        spawn_locked(self.inner.clone(), move |queue| {
+            queue.take_one(timeout_seconds)
+        })
+        .await
     }
 }
 
@@ -2837,25 +3048,37 @@ impl AsyncRedisStream {
     where
         S: Serialize + Send + 'static,
     {
-        spawn_locked(self.inner.clone(), move |stream| stream.add(&value, msg_id.as_deref())).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.add(&value, msg_id.as_deref())
+        })
+        .await
     }
 
     pub async fn take_messages(&self, count: usize, block_ms: i64) -> Result<Vec<Message>> {
-        spawn_locked(self.inner.clone(), move |stream| stream.take_messages(count, block_ms)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.take_messages(count, block_ms)
+        })
+        .await
     }
 
     pub async fn take_bodies<B>(&self, count: usize) -> Result<Vec<B>>
     where
         B: FromRedisPayload + Send + 'static,
     {
-        spawn_locked(self.inner.clone(), move |stream| stream.take_bodies::<B>(count)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.take_bodies::<B>(count)
+        })
+        .await
     }
 
     pub async fn take_structs<T>(&self, count: usize) -> Result<Vec<T>>
     where
         T: DeserializeOwned + Send + 'static,
     {
-        spawn_locked(self.inner.clone(), move |stream| stream.take_structs::<T>(count)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.take_structs::<T>(count)
+        })
+        .await
     }
 
     pub async fn take_one_body<B>(&self) -> Result<Option<B>>
@@ -2893,7 +3116,10 @@ impl AsyncRedisStream {
     }
 
     pub async fn trim(&self, max_len: i64, accurate: bool) -> Result<i64> {
-        spawn_locked(self.inner.clone(), move |stream| stream.trim(max_len, accurate)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.trim(max_len, accurate)
+        })
+        .await
     }
 
     pub async fn trim_before(&self, time: NaiveDateTime) -> Result<i64> {
@@ -2918,11 +3144,22 @@ impl AsyncRedisStream {
         end: NaiveDateTime,
         count: i64,
     ) -> Result<Vec<Message>> {
-        spawn_locked(self.inner.clone(), move |stream| stream.range_time(start, end, count)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.range_time(start, end, count)
+        })
+        .await
     }
 
-    pub async fn read(&self, start_id: String, count: usize, block_ms: i64) -> Result<Vec<Message>> {
-        spawn_locked(self.inner.clone(), move |stream| stream.read(&start_id, count, block_ms)).await
+    pub async fn read(
+        &self,
+        start_id: String,
+        count: usize,
+        block_ms: i64,
+    ) -> Result<Vec<Message>> {
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.read(&start_id, count, block_ms)
+        })
+        .await
     }
 
     pub async fn read_group(
@@ -2940,7 +3177,10 @@ impl AsyncRedisStream {
     }
 
     pub async fn pending_info(&self, group: String) -> Result<Option<PendingInfo>> {
-        spawn_locked(self.inner.clone(), move |stream| stream.pending_info(&group)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.pending_info(&group)
+        })
+        .await
     }
 
     pub async fn pending(
@@ -2970,11 +3210,17 @@ impl AsyncRedisStream {
     }
 
     pub async fn group_create(&self, group: String, start_id: Option<String>) -> Result<bool> {
-        spawn_locked(self.inner.clone(), move |stream| stream.group_create(&group, start_id.as_deref())).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.group_create(&group, start_id.as_deref())
+        })
+        .await
     }
 
     pub async fn group_destroy(&self, group: String) -> Result<i64> {
-        spawn_locked(self.inner.clone(), move |stream| stream.group_destroy(&group)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.group_destroy(&group)
+        })
+        .await
     }
 
     pub async fn group_delete_consumer(&self, group: String, consumer: String) -> Result<i64> {
@@ -2985,7 +3231,10 @@ impl AsyncRedisStream {
     }
 
     pub async fn group_set_id(&self, group: String, start_id: String) -> Result<bool> {
-        spawn_locked(self.inner.clone(), move |stream| stream.group_set_id(&group, &start_id)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.group_set_id(&group, &start_id)
+        })
+        .await
     }
 
     pub async fn get_info(&self) -> Result<Option<StreamInfo>> {
@@ -2997,7 +3246,9 @@ impl AsyncRedisStream {
     }
 
     pub async fn get_consumers(&self, group: String) -> Result<Vec<ConsumerInfo>> {
-        spawn_locked(self.inner.clone(), move |stream| stream.get_consumers(&group)).await
+        spawn_locked(self.inner.clone(), move |stream| {
+            stream.get_consumers(&group)
+        })
+        .await
     }
 }
-

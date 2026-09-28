@@ -119,20 +119,18 @@ pub mod stack;
 pub mod tair;
 pub(crate) mod util;
 
+pub use async_api::{
+    AsyncFullRedis, AsyncHyperLogLog, AsyncPubSub, AsyncRedis, AsyncRedisDelayQueue, AsyncRedisGeo,
+    AsyncRedisHash, AsyncRedisList, AsyncRedisQueue, AsyncRedisReliableQueue, AsyncRedisSet,
+    AsyncRedisSortedSet, AsyncRedisStack, AsyncRedisStream,
+};
 pub use encoder::{FromRedisPayload, Json, ToRedisPayload};
 pub use error::{Error, Result};
 pub use full::{FullRedis, LockHandle, SlowLogEntry};
 pub use options::{RedisOptions, RedisPoolConfig, ServerMode};
 pub use redis::{Pipeline, Redis, ServerType};
 pub use resp::RespValue;
-pub use services::{
-    RedisDeferred, RedisEventBus, RedisStat, RedLock, acquire_red_lock,
-};
-pub use async_api::{
-    AsyncFullRedis, AsyncHyperLogLog, AsyncRedis, AsyncRedisDelayQueue, AsyncRedisGeo,
-    AsyncRedisHash, AsyncRedisList, AsyncRedisQueue, AsyncRedisReliableQueue,
-    AsyncRedisSet, AsyncRedisSortedSet, AsyncRedisStack, AsyncRedisStream, AsyncPubSub,
-};
+pub use services::{RedLock, RedisDeferred, RedisEventBus, RedisStat, acquire_red_lock};
 
 // 常用类型直达
 pub use cluster::{

@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use crate::encoder::{FromRedisPayload, ToRedisPayload};
 use crate::error::Result;
 use crate::full::FullRedis;
-use crate::util::{decode, decode_pairs, decode_bytes, int_or, payload, strings};
+use crate::util::{decode, decode_bytes, decode_pairs, int_or, payload, strings};
 
 /// 字段与值对（值为 `None` 表示字段存在但解码失败）。
 pub type FieldPairs<K, V> = Vec<(K, Option<V>)>;
@@ -49,7 +49,12 @@ where
 
     /// 字段数量（`HLEN`）。
     pub fn count(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"HLEN", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"HLEN", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -59,7 +64,10 @@ where
 
     /// 所有字段（`HKEYS`）。
     pub fn keys(&self) -> Result<Vec<K>> {
-        let rs = self.redis.redis().execute(&[b"HKEYS", self.key.as_bytes()])?;
+        let rs = self
+            .redis
+            .redis()
+            .execute(&[b"HKEYS", self.key.as_bytes()])?;
         Ok(rs
             .into_array()
             .unwrap_or_default()
@@ -70,7 +78,10 @@ where
 
     /// 所有值（`HVALS`）。
     pub fn values(&self) -> Result<Vec<V>> {
-        let rs = self.redis.redis().execute(&[b"HVALS", self.key.as_bytes()])?;
+        let rs = self
+            .redis
+            .redis()
+            .execute(&[b"HVALS", self.key.as_bytes()])?;
         Ok(rs
             .into_array()
             .unwrap_or_default()
@@ -374,7 +385,8 @@ where
         let mut result = Vec::new();
         let mut cursor = 0u64;
         loop {
-            let (next, pairs) = self.scan(cursor, pattern, if count == 0 { 1000 } else { count })?;
+            let (next, pairs) =
+                self.scan(cursor, pattern, if count == 0 { 1000 } else { count })?;
             for (k, v) in pairs {
                 if let Some(v) = v {
                     result.push((k, v));

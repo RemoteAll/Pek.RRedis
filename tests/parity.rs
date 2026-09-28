@@ -62,7 +62,9 @@ fn bit_field_roundtrip() {
     assert_eq!(rs, vec![0, 255]);
 
     // INCRBY 溢出按位宽回绕（255 + 1 → 0）
-    let rs = redis.bit_field("bits", &["INCRBY", "u8", "0", "1"]).unwrap();
+    let rs = redis
+        .bit_field("bits", &["INCRBY", "u8", "0", "1"])
+        .unwrap();
     assert_eq!(rs, vec![0]);
 
     // 有符号与 `#` 字段偏移
@@ -75,7 +77,8 @@ fn bit_field_roundtrip() {
 #[test]
 fn fullredis_convenience_wrappers_apply_prefixes() {
     let server = start_mock_redis();
-    let redis = FullRedis::from_config(&format!("server={};db=0;prefix=app:", server.addr)).unwrap();
+    let redis =
+        FullRedis::from_config(&format!("server={};db=0;prefix=app:", server.addr)).unwrap();
 
     assert!(redis.set("setget", "old", 0).unwrap());
     let old: Option<String> = redis.set_get("setget", "new".to_string(), 30).unwrap();
@@ -94,8 +97,14 @@ fn fullredis_convenience_wrappers_apply_prefixes() {
     assert_eq!(list_len(&server, "app:list"), 3);
     assert_eq!(redis.lpos("list", "c", 0, 0, 0).unwrap(), vec![2]);
     assert_eq!(redis.lpos("list", "a", 0, 1, 0).unwrap(), vec![0]);
-    assert_eq!(redis.brpop::<String>("list", 1).unwrap().as_deref(), Some("c"));
-    assert_eq!(redis.blpop::<String>("list", 1).unwrap().as_deref(), Some("a"));
+    assert_eq!(
+        redis.brpop::<String>("list", 1).unwrap().as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        redis.blpop::<String>("list", 1).unwrap().as_deref(),
+        Some("a")
+    );
 
     assert_eq!(redis.sadd("set", &["x", "y", "x"]).unwrap(), 2);
     assert_eq!(redis.srem("set", &["y"]).unwrap(), 1);
@@ -109,18 +118,32 @@ fn fullredis_convenience_wrappers_apply_prefixes() {
     assert_eq!(all.get("f1").map(|value| value.as_str()), Some("v1"));
 
     assert!(redis.copy("setget", "setget:copy", None, false).unwrap());
-    assert_eq!(raw_get(&server, "app:setget:copy").as_deref(), Some(&b"new"[..]));
+    assert_eq!(
+        raw_get(&server, "app:setget:copy").as_deref(),
+        Some(&b"new"[..])
+    );
     assert!(!redis.copy("setget", "setget:copy", None, false).unwrap());
     assert!(redis.copy("setget", "setget:copy", None, true).unwrap());
 
     let mem = redis.memory_usage("setget", 0).unwrap();
     assert!(mem.unwrap_or_default() > 0);
-    assert_eq!(redis.object_encoding("setget").unwrap().as_deref(), Some("embstr"));
+    assert_eq!(
+        redis.object_encoding("setget").unwrap().as_deref(),
+        Some("embstr")
+    );
 
     assert!(redis.set("bits:a", vec![0b1010_0000u8], 0).unwrap());
     assert!(redis.set("bits:b", vec![0b1100_0000u8], 0).unwrap());
-    assert_eq!(redis.bit_op("OR", "bits:or", &["bits:a", "bits:b"]).unwrap(), 1);
-    assert_eq!(raw_get(&server, "app:bits:or").as_deref(), Some(&[0b1110_0000][..]));
+    assert_eq!(
+        redis
+            .bit_op("OR", "bits:or", &["bits:a", "bits:b"])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        raw_get(&server, "app:bits:or").as_deref(),
+        Some(&[0b1110_0000][..])
+    );
 }
 
 // ==================== 哈希扩展 ====================
@@ -133,7 +156,10 @@ fn hash_hgetdel_and_hgetex() {
     hash.set(&"f1".to_string(), &"v1".to_string()).unwrap();
     let old = hash.hgetdel(&"f1".to_string()).unwrap();
     assert_eq!(old.as_deref(), Some("v1"), "HGETDEL 应返回旧值");
-    assert!(hash.get(&"f1".to_string()).unwrap().is_none(), "字段应被删除");
+    assert!(
+        hash.get(&"f1".to_string()).unwrap().is_none(),
+        "字段应被删除"
+    );
     assert!(hash.hgetdel(&"f1".to_string()).unwrap().is_none());
 
     hash.set(&"f2".to_string(), &"v2".to_string()).unwrap();
@@ -149,7 +175,8 @@ fn hash_hgetdel_and_hgetex() {
 fn list_index_of_insert_and_remove_at() {
     let (_server, redis) = mock_full();
     let list = redis.get_list::<String>("l");
-    list.push_back_many(&["a".into(), "b".into(), "c".into()]).unwrap();
+    list.push_back_many(&["a".into(), "b".into(), "c".into()])
+        .unwrap();
 
     assert_eq!(list.index_of(&"b".to_string()).unwrap(), Some(1));
     assert_eq!(list.index_of(&"x".to_string()).unwrap(), None);
@@ -161,14 +188,19 @@ fn list_index_of_insert_and_remove_at() {
     assert_eq!(list.get_all().unwrap(), vec!["x", "b", "c"]);
 
     assert_eq!(list.remove_at(99).unwrap(), 0, "越界删除返回 0");
-    assert_eq!(list.insert_at(99, &"y".to_string()).unwrap(), -1, "越界插入返回 -1");
+    assert_eq!(
+        list.insert_at(99, &"y".to_string()).unwrap(),
+        -1,
+        "越界插入返回 -1"
+    );
 }
 
 #[test]
 fn lmove_blmove_and_lmpop() {
     let (_server, redis) = mock_full();
     let src = redis.get_list::<String>("src");
-    src.push_back_many(&["1".into(), "2".into(), "3".into()]).unwrap();
+    src.push_back_many(&["1".into(), "2".into(), "3".into()])
+        .unwrap();
 
     // RIGHT → LEFT
     let moved: Option<String> = redis.lmove("src", "dst", false, true).unwrap();
@@ -189,7 +221,9 @@ fn lmove_blmove_and_lmpop() {
     assert_eq!(popped.0, "src");
     assert_eq!(popped.1, vec!["2"]);
 
-    let none = redis.lmpop::<String>(&["empty1", "empty2"], true, 1).unwrap();
+    let none = redis
+        .lmpop::<String>(&["empty1", "empty2"], true, 1)
+        .unwrap();
     assert!(none.is_none());
 }
 
@@ -224,7 +258,11 @@ fn set_mismember_and_sinter_card() {
     assert_eq!(flags, vec![true, false, true]);
 
     assert_eq!(redis.sinter_card(&["s1", "s2"], 0).unwrap(), 2);
-    assert_eq!(redis.sinter_card(&["s1", "s2"], 1).unwrap(), 1, "LIMIT 生效");
+    assert_eq!(
+        redis.sinter_card(&["s1", "s2"], 1).unwrap(),
+        1,
+        "LIMIT 生效"
+    );
     assert_eq!(redis.sinter_card(&["s1", "none"], 0).unwrap(), 0);
 }
 
@@ -241,10 +279,14 @@ fn zset_add_options_and_aggregations() {
     z2.add(&"c".to_string(), 4.0).unwrap();
 
     // INCR 选项：a: 1 + 5 = 6
-    let v = z1.add_with_options("INCR", &[(5.0, "a".to_string())]).unwrap();
+    let v = z1
+        .add_with_options("INCR", &[(5.0, "a".to_string())])
+        .unwrap();
     assert_eq!(v, 6.0);
     // NX 选项：已存在成员不更新
-    let n = z1.add_with_options("NX", &[(0.0, "a".to_string())]).unwrap();
+    let n = z1
+        .add_with_options("NX", &[(0.0, "a".to_string())])
+        .unwrap();
     assert_eq!(n, 0.0);
 
     // 并集（SUM）：a=6, b=2+3=5, c=4 → 按分数排序 c,b,a
@@ -254,7 +296,10 @@ fn zset_add_options_and_aggregations() {
         .union_with_scores(&["z2"], Some(&[1.0, 2.0]), Some("SUM"))
         .unwrap();
     assert_eq!(
-        weighted.iter().map(|(m, s)| (m.as_str(), *s)).collect::<Vec<_>>(),
+        weighted
+            .iter()
+            .map(|(m, s)| (m.as_str(), *s))
+            .collect::<Vec<_>>(),
         vec![("a", 6.0), ("b", 8.0), ("c", 8.0)]
     );
     // 并集（MAX）：a=6, b=max(2,3)=3, c=4 → b,c,a
@@ -409,8 +454,14 @@ fn prometheus_metrics_export() {
     let (_server, redis) = mock_full();
     let text = redis.get_prometheus_metrics().unwrap();
     assert!(text.contains("newlife_redis_connected_clients 1"), "{text}");
-    assert!(text.contains("newlife_redis_used_memory_bytes 1024"), "{text}");
-    assert!(text.contains("newlife_redis_commands_processed_total 7"), "{text}");
+    assert!(
+        text.contains("newlife_redis_used_memory_bytes 1024"),
+        "{text}"
+    );
+    assert!(
+        text.contains("newlife_redis_commands_processed_total 7"),
+        "{text}"
+    );
     assert!(text.contains("newlife_redis_db0_keys 1"), "{text}");
 }
 
@@ -456,10 +507,7 @@ fn red_lock_times_out_without_quorum() {
     let start = std::time::Instant::now();
     let lock = acquire_red_lock(&[live, dead], "rl:nq", 500, 30_000).unwrap();
     assert!(lock.is_none(), "达不到多数派应返回 None");
-    assert!(
-        start.elapsed().as_millis() >= 300,
-        "应等待到超时才返回"
-    );
+    assert!(start.elapsed().as_millis() >= 300, "应等待到超时才返回");
     assert!(raw_get(&a, "rl:nq").is_none(), "失败后应回滚已写实例");
 }
 
@@ -528,17 +576,11 @@ fn consume_json_failure_counts_and_retries() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counter = attempts.clone();
     queue
-        .consume_json::<serde_json::Value, _>(
-            0,
-            Duration::from_millis(2),
-            None,
-            &cancel,
-            |_, _| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                cancel.store(true, Ordering::SeqCst);
-                Err("处理失败".into())
-            },
-        )
+        .consume_json::<serde_json::Value, _>(0, Duration::from_millis(2), None, &cancel, |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            cancel.store(true, Ordering::SeqCst);
+            Err("处理失败".into())
+        })
         .unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -650,19 +692,28 @@ fn tair_ex_extensions() {
     // TairHash：EXHSET / EXHGET / EXHGETWITHVER
     assert_eq!(redis.ex_hset("eh", "f1", "v1", 0, false, 0).unwrap(), 1);
     assert_eq!(redis.ex_hset("eh", "f1", "v2", 0, false, 0).unwrap(), 0);
-    assert_eq!(redis.ex_hset("eh", "f1", "v3", 0, true, 0).unwrap(), 0, "NX 已存在不更新");
+    assert_eq!(
+        redis.ex_hset("eh", "f1", "v3", 0, true, 0).unwrap(),
+        0,
+        "NX 已存在不更新"
+    );
     assert_eq!(
         redis.ex_hget::<String>("eh", "f1").unwrap().as_deref(),
         Some("v2")
     );
-    let (val, fver) = redis.ex_hget_with_ver::<String>("eh", "f1").unwrap().unwrap();
+    let (val, fver) = redis
+        .ex_hget_with_ver::<String>("eh", "f1")
+        .unwrap()
+        .unwrap();
     assert_eq!(val.as_deref(), Some("v2"));
     assert_eq!(fver, 2);
 
     // TairHash：EXHINCRBY / EXHMGET / EXHPTTL
     assert_eq!(redis.ex_hincr_by("eh", "cnt", 7, 0).unwrap(), 7);
     assert_eq!(redis.ex_hincr_by("eh", "cnt", 1, 0).unwrap(), 8);
-    let m = redis.ex_hmget::<String>("eh", &["f1", "cnt", "none"]).unwrap();
+    let m = redis
+        .ex_hmget::<String>("eh", &["f1", "cnt", "none"])
+        .unwrap();
     assert_eq!(m[0].as_deref(), Some("v2"));
     assert_eq!(m[1].as_deref(), Some("8"));
     assert!(m[2].is_none());
@@ -701,10 +752,7 @@ fn consume_raw_success_and_error_count() {
         .unwrap();
     assert_eq!(list_len(&server, queue.ack_key()), 1);
     let md5_key = format!("cr:Error:{}", dhrust::sign::md5_hex("plain-message"));
-    assert_eq!(
-        raw_get(&server, &md5_key).as_deref(),
-        Some(b"1".as_slice())
-    );
+    assert_eq!(raw_get(&server, &md5_key).as_deref(), Some(b"1".as_slice()));
 
     // 回滚后成功消费
     queue.retry_ack().unwrap();

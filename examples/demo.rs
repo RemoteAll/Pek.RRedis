@@ -46,8 +46,8 @@
 mod support;
 
 use std::future::Future;
-use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
@@ -290,7 +290,9 @@ fn run() -> i32 {
             code
         }
         other => {
-            println!("未知命令：{other}（可用：selftest/find-slot-key/set-key/write/verify/write-async/verify-async/push-async/consume-async/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/deferred-add/deferred-process/stat-stage/stat-process-once/eventbus-publish/eventbus-subscribe/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+            println!(
+                "未知命令：{other}（可用：selftest/find-slot-key/set-key/write/verify/write-async/verify-async/push-async/consume-async/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/deferred-add/deferred-process/stat-stage/stat-process-once/eventbus-publish/eventbus-subscribe/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）"
+            );
             2
         }
     };
@@ -461,7 +463,10 @@ impl AsyncDemoCtx {
     }
 
     async fn write(&mut self) -> i32 {
-        println!("[write-async/{SIDE}] 异步写入固定样本 → prefix={}", self.prefix);
+        println!(
+            "[write-async/{SIDE}] 异步写入固定样本 → prefix={}",
+            self.prefix
+        );
         self.rds
             .remove_many(
                 [
@@ -473,7 +478,10 @@ impl AsyncDemoCtx {
             )
             .await
             .unwrap();
-        self.rds.set("str".into(), SAMPLE_STRING.to_string(), 0).await.unwrap();
+        self.rds
+            .set("str".into(), SAMPLE_STRING.to_string(), 0)
+            .await
+            .unwrap();
         self.rds.set("int".into(), SAMPLE_INT, 0).await.unwrap();
         self.rds.set("bool".into(), true, 0).await.unwrap();
         self.rds.set("dt".into(), sample_time(), 0).await.unwrap();
@@ -516,7 +524,11 @@ impl AsyncDemoCtx {
     async fn verify(&mut self) -> i32 {
         println!("[verify-async/{SIDE}] 异步校验固定样本（含对方 {OTHER} 写入的数据）");
         let mine = self.rds.get_string(format!("{SIDE}:marker")).await.unwrap();
-        let other = self.rds.get_string(format!("{OTHER}:marker")).await.unwrap();
+        let other = self
+            .rds
+            .get_string(format!("{OTHER}:marker"))
+            .await
+            .unwrap();
         println!(
             "  · 本侧标记：{}；对方 {OTHER} 标记：{}",
             if mine.is_some() { "有" } else { "无" },
@@ -524,20 +536,48 @@ impl AsyncDemoCtx {
         );
 
         let str_raw = self.rds.get_string("str".into()).await.unwrap();
-        self.check(str_raw.as_deref() == Some(SAMPLE_STRING), "str 读回", str_raw.clone());
+        self.check(
+            str_raw.as_deref() == Some(SAMPLE_STRING),
+            "str 读回",
+            str_raw.clone(),
+        );
         let int_val = self.rds.get::<i32>("int".into()).await.unwrap();
-        self.check(int_val == Some(SAMPLE_INT), "int 读回", int_val.map(|v| v.to_string()));
+        self.check(
+            int_val == Some(SAMPLE_INT),
+            "int 读回",
+            int_val.map(|v| v.to_string()),
+        );
         let bool_val = self.rds.get::<bool>("bool".into()).await.unwrap();
         let bool_raw = self.rds.get_string("bool".into()).await.unwrap();
-        self.check(bool_val == Some(true), "bool 读回", bool_val.map(|v| v.to_string()));
-        self.check(bool_raw.as_deref() == Some("True"), "bool 原始字节 = True", bool_raw.clone());
+        self.check(
+            bool_val == Some(true),
+            "bool 读回",
+            bool_val.map(|v| v.to_string()),
+        );
+        self.check(
+            bool_raw.as_deref() == Some("True"),
+            "bool 原始字节 = True",
+            bool_raw.clone(),
+        );
         let dt_val = self.rds.get::<NaiveDateTime>("dt".into()).await.unwrap();
         let dt_raw = self.rds.get_string("dt".into()).await.unwrap();
-        self.check(dt_val == Some(sample_time()), "dt 读回", dt_val.map(|v| v.to_string()));
-        self.check(dt_raw.as_deref() == Some("2026-09-26 10:00:00.123"), "dt 原始字节", dt_raw.clone());
+        self.check(
+            dt_val == Some(sample_time()),
+            "dt 读回",
+            dt_val.map(|v| v.to_string()),
+        );
+        self.check(
+            dt_raw.as_deref() == Some("2026-09-26 10:00:00.123"),
+            "dt 原始字节",
+            dt_raw.clone(),
+        );
 
         let json_raw = self.rds.get_string("json".into()).await.unwrap();
-        let model = self.rds.get::<Json<DemoModel>>("json".into()).await.unwrap();
+        let model = self
+            .rds
+            .get::<Json<DemoModel>>("json".into())
+            .await
+            .unwrap();
         self.check(
             model.map(|j| j.0)
                 == Some(DemoModel {
@@ -550,7 +590,10 @@ impl AsyncDemoCtx {
         );
         self.check(
             json_raw.clone().unwrap_or_default().contains("\"Name\"")
-                && json_raw.clone().unwrap_or_default().contains("\"CreateTime\"")
+                && json_raw
+                    .clone()
+                    .unwrap_or_default()
+                    .contains("\"CreateTime\"")
                 && json_raw.clone().unwrap_or_default().contains("\"Count\""),
             "json 原始字段名 PascalCase",
             json_raw.clone(),
@@ -566,7 +609,11 @@ impl AsyncDemoCtx {
         );
 
         let list = self.rds.get_list::<i32>("list");
-        self.check(list.get_all().await.unwrap() == vec![1, 2, 3], "list [1,2,3]", None);
+        self.check(
+            list.get_all().await.unwrap() == vec![1, 2, 3],
+            "list [1,2,3]",
+            None,
+        );
 
         let set = self.rds.get_set::<String>("set");
         let mut members = set.members().await.unwrap();
@@ -615,7 +662,9 @@ impl AsyncDemoCtx {
     }
 
     async fn consume(&mut self, count: usize) -> i32 {
-        println!("[consume-async/{SIDE}] 异步用可靠队列消费 {count} 条消息并确认（对方 push 的消息同样可消费）");
+        println!(
+            "[consume-async/{SIDE}] 异步用可靠队列消费 {count} 条消息并确认（对方 push 的消息同样可消费）"
+        );
         let queue = self.rds.get_reliable_queue::<String>("reliable");
         let mut got = 0;
         for _ in 0..count {
@@ -628,7 +677,10 @@ impl AsyncDemoCtx {
                 None => break,
             }
         }
-        println!("  ✔ 已确认 {got} 条；剩余队列长度：{}", queue.count().await.unwrap());
+        println!(
+            "  ✔ 已确认 {got} 条；剩余队列长度：{}",
+            queue.count().await.unwrap()
+        );
         0
     }
 }
@@ -691,17 +743,25 @@ impl DemoCtx {
         ])
         .unwrap();
 
-        rds.redis().set(self.full_key("str"), SAMPLE_STRING, 0).unwrap();
-        rds.redis().set(self.full_key("int"), SAMPLE_INT, 0).unwrap();
+        rds.redis()
+            .set(self.full_key("str"), SAMPLE_STRING, 0)
+            .unwrap();
+        rds.redis()
+            .set(self.full_key("int"), SAMPLE_INT, 0)
+            .unwrap();
         rds.redis().set(self.full_key("bool"), true, 0).unwrap();
-        rds.redis().set(self.full_key("dt"), sample_time(), 0).unwrap();
+        rds.redis()
+            .set(self.full_key("dt"), sample_time(), 0)
+            .unwrap();
 
         let model = DemoModel {
             name: SAMPLE_NAME.into(),
             create_time: sample_json_time(),
             count: SAMPLE_COUNT,
         };
-        rds.redis().set(self.full_key("json"), Json(&model), 0).unwrap();
+        rds.redis()
+            .set(self.full_key("json"), Json(&model), 0)
+            .unwrap();
 
         let hash = rds.get_hash::<i32>("hash");
         hash.set(&"a".to_string(), &1).unwrap();
@@ -726,7 +786,11 @@ impl DemoCtx {
         // 本侧标记与时间戳（供对方确认数据来源）
         let now = Local::now().naive_local();
         rds.redis()
-            .set(self.full_key(&format!("{SIDE}:marker")), now.to_string(), 3600)
+            .set(
+                self.full_key(&format!("{SIDE}:marker")),
+                now.to_string(),
+                3600,
+            )
             .unwrap();
 
         println!("  ✔ 已写入：str/int/bool/dt/json/hash/list/set/zset/queue/{SIDE}:marker");
@@ -754,10 +818,18 @@ impl DemoCtx {
             str_raw.clone(),
         );
         let int_val = self.get::<i32>("int").unwrap();
-        self.check(int_val == Some(SAMPLE_INT), "int 读回", int_val.map(|v| v.to_string()));
+        self.check(
+            int_val == Some(SAMPLE_INT),
+            "int 读回",
+            int_val.map(|v| v.to_string()),
+        );
         let bool_val = self.get::<bool>("bool").unwrap();
         let bool_raw = self.get_string("bool").unwrap();
-        self.check(bool_val == Some(true), "bool 读回", bool_val.map(|v| v.to_string()));
+        self.check(
+            bool_val == Some(true),
+            "bool 读回",
+            bool_val.map(|v| v.to_string()),
+        );
         self.check(
             bool_raw.as_deref() == Some("True"),
             "bool 原始字节 = True",
@@ -765,7 +837,11 @@ impl DemoCtx {
         );
         let dt_val = self.get::<NaiveDateTime>("dt").unwrap();
         let dt_raw = self.get_string("dt").unwrap();
-        self.check(dt_val == Some(sample_time()), "dt 读回", dt_val.map(|v| v.to_string()));
+        self.check(
+            dt_val == Some(sample_time()),
+            "dt 读回",
+            dt_val.map(|v| v.to_string()),
+        );
         self.check(
             dt_raw.as_deref() == Some("2026-09-26 10:00:00.123"),
             "dt 原始字节",
@@ -803,7 +879,11 @@ impl DemoCtx {
             None,
         );
         let list = rds.get_list::<i32>("list");
-        self.check(list.get_all().unwrap() == vec![1, 2, 3], "list [1,2,3]", None);
+        self.check(
+            list.get_all().unwrap() == vec![1, 2, 3],
+            "list [1,2,3]",
+            None,
+        );
         let set = rds.get_set::<String>("set");
         self.check(
             set.contains(&"x".to_string()).unwrap() && set.contains(&"y".to_string()).unwrap(),
@@ -836,7 +916,10 @@ impl DemoCtx {
     }
 
     fn write_advanced(&mut self) {
-        println!("[write-advanced/{SIDE}] 写入高级 API 联调样本 → prefix={}", self.prefix);
+        println!(
+            "[write-advanced/{SIDE}] 写入高级 API 联调样本 → prefix={}",
+            self.prefix
+        );
         let rds = self.rds.clone();
 
         let _ = rds.function_delete("advlib");
@@ -863,7 +946,9 @@ impl DemoCtx {
         ])
         .unwrap();
 
-        rds.redis().set(self.full_key("adv:writer"), SIDE, 3600).unwrap();
+        rds.redis()
+            .set(self.full_key("adv:writer"), SIDE, 3600)
+            .unwrap();
         rds.redis()
             .set(self.full_key("adv:getex"), format!("from-{SIDE}"), 0)
             .unwrap();
@@ -872,8 +957,10 @@ impl DemoCtx {
             .unwrap();
 
         let hash = rds.get_hash::<String>("adv:hash");
-        hash.set(&"del".to_string(), &"value-del".to_string()).unwrap();
-        hash.set(&"ex".to_string(), &"value-ex".to_string()).unwrap();
+        hash.set(&"del".to_string(), &"value-del".to_string())
+            .unwrap();
+        hash.set(&"ex".to_string(), &"value-ex".to_string())
+            .unwrap();
 
         let move_src = rds.get_list::<String>("adv:list:move:src");
         move_src
@@ -943,14 +1030,26 @@ impl DemoCtx {
             persist.clone(),
         );
         let expire2 = self.rds.expire_time("adv:getex").unwrap();
-        self.check(expire2 == -1, "GETEX PERSIST 清除过期", Some(expire2.to_string()));
+        self.check(
+            expire2 == -1,
+            "GETEX PERSIST 清除过期",
+            Some(expire2.to_string()),
+        );
         let idle = self.rds.object_idle_time("adv:getex").unwrap();
-        self.check(idle == Some(0), "OBJECT IDLETIME", idle.map(|v| v.to_string()));
+        self.check(
+            idle == Some(0),
+            "OBJECT IDLETIME",
+            idle.map(|v| v.to_string()),
+        );
         let freq = self.rds.object_freq("adv:getex").unwrap();
         self.check(freq == Some(0), "OBJECT FREQ", freq.map(|v| v.to_string()));
 
         let bit = self.rds.bit_field("adv:bits", &["GET", "u8", "0"]).unwrap();
-        self.check(bit == vec![160], "BITFIELD GET u8 0", Some(format!("{bit:?}")));
+        self.check(
+            bit == vec![160],
+            "BITFIELD GET u8 0",
+            Some(format!("{bit:?}")),
+        );
 
         let hash = self.rds.get_hash::<String>("adv:hash");
         let deleted = hash.hgetdel(&"del".to_string()).unwrap();
@@ -989,7 +1088,11 @@ impl DemoCtx {
             "BLMOVE LEFT->RIGHT",
             blmoved.clone(),
         );
-        let moved_list = self.rds.get_list::<String>("adv:list:move:dst").get_all().unwrap();
+        let moved_list = self
+            .rds
+            .get_list::<String>("adv:list:move:dst")
+            .get_all()
+            .unwrap();
         self.check(
             moved_list == vec!["3".to_string(), "1".to_string()],
             "LMOVE/BLMOVE 目标列表顺序",
@@ -1046,7 +1149,10 @@ impl DemoCtx {
             "SMISMEMBER 成员存在性",
             Some(format!("{members:?}")),
         );
-        let sinter = self.rds.sinter_card(&["adv:set:1", "adv:set:2"], 0).unwrap();
+        let sinter = self
+            .rds
+            .sinter_card(&["adv:set:1", "adv:set:2"], 0)
+            .unwrap();
         self.check(sinter == 2, "SINTERCARD 交集基数", Some(sinter.to_string()));
 
         let scores = self.rds.zmscore("adv:zset:score", &["a", "b"]).unwrap();
@@ -1070,7 +1176,11 @@ impl DemoCtx {
             .get_sorted_set::<String>("adv:zset:range")
             .range_store("adv:zset:range:dest", 1.5, 3.0, true, false, 0, 10)
             .unwrap();
-        self.check(stored == 2, "ZRANGESTORE 存储数量", Some(stored.to_string()));
+        self.check(
+            stored == 2,
+            "ZRANGESTORE 存储数量",
+            Some(stored.to_string()),
+        );
         let stored_values = self
             .rds
             .get_sorted_set::<String>("adv:zset:range:dest")
@@ -1089,11 +1199,7 @@ impl DemoCtx {
         {
             Some((key, items)) => self.check(
                 key.ends_with("adv:zset:pop:1")
-                    && items
-                        == vec![
-                            ("p1".to_string(), 1.0),
-                            ("p2".to_string(), 2.0),
-                        ],
+                    && items == vec![("p1".to_string(), 1.0), ("p2".to_string(), 2.0)],
                 "ZMPOP 弹出最小分成员",
                 Some(format!("{key} => {items:?}")),
             ),
@@ -1167,7 +1273,11 @@ impl DemoCtx {
                 Some(entry.duration_us.to_string()),
             );
             self.check(
-                entry.command == OPS_SLOWLOG_COMMAND.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                entry.command
+                    == OPS_SLOWLOG_COMMAND
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
                 "SLOWLOG command",
                 Some(format!("{:?}", entry.command)),
             );
@@ -1222,7 +1332,10 @@ impl DemoCtx {
             Some(after.to_string()),
         );
 
-        let reset = self.rds.latency_reset(&[OPS_LATENCY_EVENT]).unwrap_or_default();
+        let reset = self
+            .rds
+            .latency_reset(&[OPS_LATENCY_EVENT])
+            .unwrap_or_default();
         self.check(
             reset == 1,
             "LATENCY RESET 清空样本事件",
@@ -1270,7 +1383,9 @@ impl DemoCtx {
 
         let latest = self.rds.latency_latest().unwrap_or_default();
         self.check(
-            latest.iter().all(|(event, _, _, _)| event != OPS_LATENCY_EVENT),
+            latest
+                .iter()
+                .all(|(event, _, _, _)| event != OPS_LATENCY_EVENT),
             "LATENCY LATEST 不含样本事件",
             Some(format!("{:?}", latest)),
         );
@@ -1287,11 +1402,16 @@ impl DemoCtx {
             // 注意：Rust 的零填充写法是 {i:04}（{i:0000} 会被解析为宽度 0）
             queue.add(&format!("msg-{i:04}")).unwrap();
         }
-        println!("  ✔ 队列长度：{}（消息格式 msg-0001 ...）", queue.count().unwrap());
+        println!(
+            "  ✔ 队列长度：{}（消息格式 msg-0001 ...）",
+            queue.count().unwrap()
+        );
     }
 
     fn consume(&mut self, count: usize) {
-        println!("[consume/{SIDE}] 用可靠队列消费 {count} 条消息并确认（对方 push 的消息同样可消费）");
+        println!(
+            "[consume/{SIDE}] 用可靠队列消费 {count} 条消息并确认（对方 push 的消息同样可消费）"
+        );
         let queue = self.rds.get_reliable_queue::<String>("reliable");
         let mut got = 0;
         for _ in 0..count {
@@ -1304,7 +1424,10 @@ impl DemoCtx {
                 None => break,
             }
         }
-        println!("  ✔ 已确认 {got} 条；剩余队列长度：{}", queue.count().unwrap());
+        println!(
+            "  ✔ 已确认 {got} 条；剩余队列长度：{}",
+            queue.count().unwrap()
+        );
     }
 
     fn queue_status(&mut self) {
@@ -1346,7 +1469,10 @@ impl DemoCtx {
     }
 
     fn lock(&mut self, seconds: u64) {
-        println!("[lock/{SIDE}] 申请分布式锁 {}lock（持有 {seconds} 秒）", self.prefix);
+        println!(
+            "[lock/{SIDE}] 申请分布式锁 {}lock（持有 {seconds} 秒）",
+            self.prefix
+        );
         let timeout = (seconds * 1000 + 1000) as i32;
         let expire = (seconds * 1000) as i32;
 
@@ -1418,7 +1544,13 @@ impl DemoCtx {
         0
     }
 
-    fn stat_stage(&mut self, name: &str, key: &str, pairs: &[(String, i32)], delay_seconds: i64) -> i32 {
+    fn stat_stage(
+        &mut self,
+        name: &str,
+        key: &str,
+        pairs: &[(String, i32)],
+        delay_seconds: i64,
+    ) -> i32 {
         println!(
             "[stat-stage/{SIDE}] name={name} key={key} delay={delay_seconds}s pairs={}",
             pairs
@@ -1482,8 +1614,16 @@ impl DemoCtx {
         0
     }
 
-    fn eventbus_subscribe(&mut self, topic: &str, group: &str, timeout_seconds: u64, from_first: bool) -> i32 {
-        println!("[eventbus-subscribe/{SIDE}] topic={topic} group={group} timeout={timeout_seconds}s");
+    fn eventbus_subscribe(
+        &mut self,
+        topic: &str,
+        group: &str,
+        timeout_seconds: u64,
+        from_first: bool,
+    ) -> i32 {
+        println!(
+            "[eventbus-subscribe/{SIDE}] topic={topic} group={group} timeout={timeout_seconds}s"
+        );
         let bus = RedisEventBus::<ServiceEventDemo>::new(self.rds.clone(), topic, group).unwrap();
         if from_first {
             bus.set_from_last_offset(false);
@@ -1639,7 +1779,10 @@ impl DemoCtx {
                         None,
                     )
                     .unwrap();
-                println!("  · XADD 对象 {code} → {:?}（字段 Name/CreateTime/Count）", id);
+                println!(
+                    "  · XADD 对象 {code} → {:?}（字段 Name/CreateTime/Count）",
+                    id
+                );
             }
         }
 
@@ -1710,7 +1853,10 @@ impl DemoCtx {
         }
 
         for c in stream.get_consumers(group).unwrap() {
-            println!("  · 消费者 {} pending={} idle={}ms", c.name, c.pending, c.idle);
+            println!(
+                "  · 消费者 {} pending={} idle={}ms",
+                c.name, c.pending, c.idle
+            );
         }
     }
 
@@ -1767,7 +1913,11 @@ fn selftest() -> i32 {
         String::from_utf8(v.to_redis_payload().unwrap().unwrap()).unwrap()
     };
 
-    check(enc(&"hello") == "hello", "字符串原样（无引号）", enc(&"hello"));
+    check(
+        enc(&"hello") == "hello",
+        "字符串原样（无引号）",
+        enc(&"hello"),
+    );
     check(enc(&123) == "123", "整数文本", enc(&123));
     check(enc(&true) == "True", "布尔 True", enc(&true));
     check(enc(&false) == "False", "布尔 False", enc(&false));
@@ -1802,11 +1952,7 @@ fn selftest() -> i32 {
     let json = enc(&Json(&model));
     println!("  · JSON 编码：{json}");
     let back = <Json<DemoModel> as FromRedisPayload>::from_redis_payload(json.as_bytes()).unwrap();
-    check(
-        back.0 == model,
-        "JSON 往返",
-        format!("{:?}", back.0),
-    );
+    check(back.0 == model, "JSON 往返", format!("{:?}", back.0));
 
     if failures.is_empty() {
         println!("\n结果：全部通过");

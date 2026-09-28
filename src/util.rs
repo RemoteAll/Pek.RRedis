@@ -14,7 +14,9 @@ pub(crate) fn decode<T: FromRedisPayload>(value: RespValue) -> Option<T> {
     if value.is_null() {
         return None;
     }
-    value.as_bytes().and_then(|b| T::from_redis_payload(&b).ok())
+    value
+        .as_bytes()
+        .and_then(|b| T::from_redis_payload(&b).ok())
 }
 
 /// 从字节解码。

@@ -35,7 +35,12 @@ where
 
     /// 元素个数（`SCARD`）。
     pub fn len(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"SCARD", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"SCARD", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -209,7 +214,9 @@ where
                 b"MATCH",
                 pattern.as_bytes(),
                 b"COUNT",
-                (if count == 0 { 1000 } else { count }).to_string().as_bytes(),
+                (if count == 0 { 1000 } else { count })
+                    .to_string()
+                    .as_bytes(),
             ])?;
 
             let mut items = rs

@@ -89,7 +89,9 @@ impl ClusterNode {
             } else {
                 Some(master.to_string())
             },
-            is_replica: flags.iter().any(|flag| flag.eq_ignore_ascii_case("slave") || flag.eq_ignore_ascii_case("replica")),
+            is_replica: flags.iter().any(|flag| {
+                flag.eq_ignore_ascii_case("slave") || flag.eq_ignore_ascii_case("replica")
+            }),
             link_up: !flags.iter().any(|flag| flag.eq_ignore_ascii_case("fail?")),
             slots: Vec::new(),
             migrations: Vec::new(),

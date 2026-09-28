@@ -81,25 +81,30 @@ impl RedisPoolConfig {
     /// 从配置字典加载（对应 C# `RedisPoolConfig.Load`）。
     pub fn load(&mut self, dic: &BTreeMap<String, String>) {
         if let Some(v) = get_int(dic, &["PoolMin", "poolmin"])
-            && v >= 0 {
-                self.min = v as usize;
-            }
+            && v >= 0
+        {
+            self.min = v as usize;
+        }
         if let Some(v) = get_int(dic, &["PoolMax", "poolmax"])
-            && v >= 0 {
-                self.max = v as usize;
-            }
+            && v >= 0
+        {
+            self.max = v as usize;
+        }
         if let Some(v) = get_int(dic, &["PoolIdleTime", "poolidletime"])
-            && v >= 0 {
-                self.idle_time = v as u64;
-            }
+            && v >= 0
+        {
+            self.idle_time = v as u64;
+        }
         if let Some(v) = get_int(dic, &["MaxLifetime", "maxlifetime"])
-            && v >= 0 {
-                self.max_lifetime = v as u64;
-            }
+            && v >= 0
+        {
+            self.max_lifetime = v as u64;
+        }
         if let Some(v) = get_int(dic, &["WaitTimeout", "waittimeout"])
-            && v >= 0 {
-                self.wait_timeout = v as u64;
-            }
+            && v >= 0
+        {
+            self.wait_timeout = v as u64;
+        }
     }
 }
 
@@ -211,7 +216,11 @@ impl RedisOptions {
             let v = v.trim();
             if !v.is_empty() {
                 self.servers = split_servers(v);
-                if self.servers.iter().any(|server| server.trim().starts_with("rediss://")) {
+                if self
+                    .servers
+                    .iter()
+                    .any(|server| server.trim().starts_with("rediss://"))
+                {
                     self.tls = true;
                 }
             }
@@ -225,14 +234,15 @@ impl RedisOptions {
 
         // 独立的 Port 配置拼接到未写端口的地址
         if let Some(port) = get_int(&dic, &["Port"])
-            && port > 0 {
-                for s in &mut self.servers {
-                    if !s.contains(':') {
-                        s.push(':');
-                        s.push_str(&port.to_string());
-                    }
+            && port > 0
+        {
+            for s in &mut self.servers {
+                if !s.contains(':') {
+                    s.push(':');
+                    s.push_str(&port.to_string());
                 }
             }
+        }
 
         if let Some(v) = dic.get("username") {
             self.user_name = Some(v.trim().to_string());
@@ -244,24 +254,28 @@ impl RedisOptions {
             self.db = v as i32;
         }
         if let Some(v) = get_int(&dic, &["Timeout", "responseTimeout", "connectTimeout"])
-            && v > 0 {
-                self.timeout_ms = v as u64;
-            }
+            && v > 0
+        {
+            self.timeout_ms = v as u64;
+        }
         if let Some(v) = dic.get("prefix")
-            && !v.is_empty() {
-                self.prefix = Some(v.clone());
-            }
+            && !v.is_empty()
+        {
+            self.prefix = Some(v.clone());
+        }
         if let Some(v) = get_int(&dic, &["ProtocolVersion"]) {
             self.protocol_version = v as i32;
         }
         if let Some(v) = get_int(&dic, &["MaxMessageSize"])
-            && v >= 0 {
-                self.max_message_size = v as usize;
-            }
+            && v >= 0
+        {
+            self.max_message_size = v as usize;
+        }
         if let Some(v) = get_int(&dic, &["Expire"])
-            && v >= 0 {
-                self.expire = v;
-            }
+            && v >= 0
+        {
+            self.expire = v;
+        }
         if let Some(v) = dic.get("mode") {
             self.mode = ServerMode::from_str(v)?;
         }
@@ -269,22 +283,25 @@ impl RedisOptions {
             self.auto_detect = v;
         }
         if let Some(v) = get_int(&dic, &["TopologyRefreshSeconds"])
-            && v >= 0 {
-                self.topology_refresh_seconds = v as u64;
-            }
+            && v >= 0
+        {
+            self.topology_refresh_seconds = v as u64;
+        }
         if let Some(v) = get_bool(&dic, &["ReadFromReplicas"]) {
             self.read_from_replicas = v;
         }
         if let Some(v) = dic.get("sentinelmastername")
-            && !v.is_empty() {
-                self.sentinel_master_name = Some(v.clone());
-            }
+            && !v.is_empty()
+        {
+            self.sentinel_master_name = Some(v.clone());
+        }
         if let Some(v) = get_bool(&dic, &["Ssl", "Tls", "UseTls"]) {
             self.tls = v;
         }
         if let Some(v) = dic.get("tlsservername")
-            && !v.is_empty() {
-                self.tls_server_name = Some(v.clone());
+            && !v.is_empty()
+        {
+            self.tls_server_name = Some(v.clone());
         }
         if let Some(v) = get_bool(&dic, &["TlsInsecure", "SslInsecure", "InsecureSkipVerify"]) {
             self.tls_insecure = v;
@@ -358,9 +375,10 @@ fn normalize_key(key: &str) -> String {
 fn get_int(dic: &BTreeMap<String, String>, keys: &[&str]) -> Option<i64> {
     for k in keys {
         if let Some(v) = dic.get(&k.to_lowercase())
-            && let Ok(n) = v.trim().parse::<i64>() {
-                return Some(n);
-            }
+            && let Ok(n) = v.trim().parse::<i64>()
+        {
+            return Some(n);
+        }
     }
     None
 }
@@ -369,10 +387,12 @@ fn get_bool(dic: &BTreeMap<String, String>, keys: &[&str]) -> Option<bool> {
     for k in keys {
         if let Some(v) = dic.get(&k.to_lowercase()) {
             let text = v.trim();
-            if text.eq_ignore_ascii_case("true") || text == "1" || text.eq_ignore_ascii_case("yes") {
+            if text.eq_ignore_ascii_case("true") || text == "1" || text.eq_ignore_ascii_case("yes")
+            {
                 return Some(true);
             }
-            if text.eq_ignore_ascii_case("false") || text == "0" || text.eq_ignore_ascii_case("no") {
+            if text.eq_ignore_ascii_case("false") || text == "0" || text.eq_ignore_ascii_case("no")
+            {
                 return Some(false);
             }
         }

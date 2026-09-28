@@ -39,7 +39,9 @@ impl HyperLogLog {
     /// 估算基数（`PFCOUNT`）。
     pub fn count(&self) -> Result<i64> {
         Ok(int_or(
-            self.redis.redis().execute(&[b"PFCOUNT", self.key.as_bytes()])?,
+            self.redis
+                .redis()
+                .execute(&[b"PFCOUNT", self.key.as_bytes()])?,
             0,
         ))
     }

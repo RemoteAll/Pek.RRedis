@@ -123,7 +123,11 @@ impl Message {
 fn smart_field_value(text: &str) -> Value {
     if let Ok(v) = serde_json::from_str::<Value>(text) {
         match v {
-            Value::Object(_) | Value::Array(_) | Value::Number(_) | Value::Bool(_) | Value::Null => {
+            Value::Object(_)
+            | Value::Array(_)
+            | Value::Number(_)
+            | Value::Bool(_)
+            | Value::Null => {
                 return v;
             }
             _ => {}
@@ -292,9 +296,10 @@ impl PendingInfo {
             for item in list {
                 if let Some(pair) = item.as_array()
                     && pair.len() == 2
-                        && let Some(name) = pair[0].as_string() {
-                            p.consumers.push((name, pair[1].as_i64().unwrap_or(0)));
-                        }
+                    && let Some(name) = pair[0].as_string()
+                {
+                    p.consumers.push((name, pair[1].as_i64().unwrap_or(0)));
+                }
             }
         }
         p
@@ -318,7 +323,10 @@ impl PendingItem {
     /// 从 `XPENDING key group start end count` 的单项解析。
     pub fn from_items(items: &[RespValue]) -> Self {
         Self {
-            id: items.first().and_then(|v| v.as_string()).unwrap_or_default(),
+            id: items
+                .first()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default(),
             consumer: items.get(1).and_then(|v| v.as_string()).unwrap_or_default(),
             idle: items.get(2).and_then(|v| v.as_i64()).unwrap_or(0),
             delivery: items.get(3).and_then(|v| v.as_i64()).unwrap_or(0),
@@ -401,10 +409,7 @@ impl RedisStream {
     pub fn set_group(&mut self, group: &str) -> Result<bool> {
         self.group = Some(group.to_string());
 
-        let exists = self
-            .get_groups()?
-            .into_iter()
-            .any(|g| g.name == group);
+        let exists = self.get_groups()?.into_iter().any(|g| g.name == group);
         if exists {
             Ok(false)
         } else {
@@ -506,8 +511,7 @@ impl RedisStream {
             if self.claims.load(Ordering::Acquire) > 0 {
                 let rs = self.read_group(group, &self.consumer.clone(), count, 3_000, Some("0"))?;
                 if !rs.is_empty() {
-                    self.claims
-                        .fetch_sub(rs.len() as i64, Ordering::AcqRel);
+                    self.claims.fetch_sub(rs.len() as i64, Ordering::AcqRel);
                     return Ok(rs);
                 }
                 self.claims.store(0, Ordering::Release);
@@ -521,9 +525,10 @@ impl RedisStream {
 
         if !rs.is_empty() {
             if group.is_none()
-                && let Some(last) = rs.last() {
-                    self.start_id = last.id.clone();
-                }
+                && let Some(last) = rs.last()
+            {
+                self.start_id = last.id.clone();
+            }
             return Ok(rs);
         }
 
@@ -668,7 +673,12 @@ impl RedisStream {
 
     fn ack_one(&self, group: &str, id: &str) -> Result<i64> {
         Ok(int_or(
-            self.call(&[b"XACK", self.key.as_bytes(), group.as_bytes(), id.as_bytes()])?,
+            self.call(&[
+                b"XACK",
+                self.key.as_bytes(),
+                group.as_bytes(),
+                id.as_bytes(),
+            ])?,
             0,
         ))
     }
@@ -689,7 +699,13 @@ impl RedisStream {
         let rs = if accurate {
             self.call(&[b"XTRIM", self.key.as_bytes(), b"MAXLEN", len.as_bytes()])?
         } else {
-            self.call(&[b"XTRIM", self.key.as_bytes(), b"MAXLEN", b"~", len.as_bytes()])?
+            self.call(&[
+                b"XTRIM",
+                self.key.as_bytes(),
+                b"MAXLEN",
+                b"~",
+                len.as_bytes(),
+            ])?
         };
         Ok(int_or(rs, 0))
     }
@@ -711,7 +727,12 @@ impl RedisStream {
     }
 
     /// 区间读取（`XRANGE`，`-`/`+` 表示最小/最大）。
-    pub fn range(&self, start_id: Option<&str>, end_id: Option<&str>, count: i64) -> Result<Vec<Message>> {
+    pub fn range(
+        &self,
+        start_id: Option<&str>,
+        end_id: Option<&str>,
+        count: i64,
+    ) -> Result<Vec<Message>> {
         let start = start_id.filter(|s| !s.is_empty()).unwrap_or("-");
         let end = end_id.filter(|s| !s.is_empty()).unwrap_or("+");
 
@@ -815,7 +836,9 @@ impl RedisStream {
         if rs.as_array().is_none() {
             return Ok(None);
         }
-        Ok(Some(PendingInfo::from_items(&rs.into_array().unwrap_or_default())))
+        Ok(Some(PendingInfo::from_items(
+            &rs.into_array().unwrap_or_default(),
+        )))
     }
 
     /// 等待列表明细（`XPENDING key group start end count`）。
@@ -952,7 +975,12 @@ impl RedisStream {
 
     /// 消费者列表（`XINFO CONSUMERS`）。
     pub fn get_consumers(&self, group: &str) -> Result<Vec<ConsumerInfo>> {
-        match self.call(&[b"XINFO", b"CONSUMERS", self.key.as_bytes(), group.as_bytes()]) {
+        match self.call(&[
+            b"XINFO",
+            b"CONSUMERS",
+            self.key.as_bytes(),
+            group.as_bytes(),
+        ]) {
             Ok(rs) => Ok(rs
                 .into_array()
                 .unwrap_or_default()
@@ -960,7 +988,8 @@ impl RedisStream {
                 .filter_map(|v| v.into_array().map(|items| ConsumerInfo::from_items(&items)))
                 .collect()),
             Err(Error::Server(msg))
-                if msg.to_uppercase().contains("NO SUCH KEY") || msg.to_uppercase().contains("NOGROUP") =>
+                if msg.to_uppercase().contains("NO SUCH KEY")
+                    || msg.to_uppercase().contains("NOGROUP") =>
             {
                 Ok(Vec::new())
             }
@@ -1030,7 +1059,11 @@ fn encode_field_value(value: &Value) -> Result<Vec<u8>> {
     match value {
         Value::String(s) => Ok(s.as_bytes().to_vec()),
         Value::Number(n) => Ok(n.to_string().into_bytes()),
-        Value::Bool(b) => Ok(if *b { b"True".to_vec() } else { b"False".to_vec() }),
+        Value::Bool(b) => Ok(if *b {
+            b"True".to_vec()
+        } else {
+            b"False".to_vec()
+        }),
         Value::Null => Ok(Vec::new()),
         other => Ok(serde_json::to_vec(other)?),
     }
@@ -1180,11 +1213,13 @@ mod tests {
         let fields = value_to_fields(&serde_json::json!(true), "__data").unwrap();
         assert_eq!(fields, vec![("__data".to_string(), b"True".to_vec())]);
 
-        let fields = value_to_fields(&serde_json::json!({"Name": "x", "Count": 7}), "__data").unwrap();
+        let fields =
+            value_to_fields(&serde_json::json!({"Name": "x", "Count": 7}), "__data").unwrap();
         assert!(fields.contains(&("Name".to_string(), b"x".to_vec())));
         assert!(fields.contains(&("Count".to_string(), b"7".to_vec())));
 
-        let fields = value_to_fields(&serde_json::json!(["k1", "v1", "k2", "v2"]), "__data").unwrap();
+        let fields =
+            value_to_fields(&serde_json::json!(["k1", "v1", "k2", "v2"]), "__data").unwrap();
         assert_eq!(
             fields,
             vec![
@@ -1196,7 +1231,10 @@ mod tests {
 
     #[test]
     fn stream_id_helpers() {
-        assert_eq!(next_stream_id_prefix("1695792000000-3"), Some("1695792000001-0".into()));
+        assert_eq!(
+            next_stream_id_prefix("1695792000000-3"),
+            Some("1695792000001-0".into())
+        );
         assert_eq!(next_stream_id_prefix("bad"), None);
 
         let t = id_to_local_time("1695792000000-0").unwrap();

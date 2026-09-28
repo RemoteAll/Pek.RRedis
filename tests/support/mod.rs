@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -246,12 +246,11 @@ pub fn start_mock_redis_tls_on(port: u16) -> MockRedis {
     let addr = listener.local_addr().unwrap().to_string();
     listener.set_nonblocking(true).unwrap();
 
-    let certified = generate_simple_self_signed(vec!["localhost".to_string()])
-        .expect("生成 TLS 证书失败");
+    let certified =
+        generate_simple_self_signed(vec!["localhost".to_string()]).expect("生成 TLS 证书失败");
     let cert_der = certified.cert.der().clone();
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        certified.key_pair.serialize_der(),
-    ));
+    let key_der =
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
     let tls_config = Arc::new(
         ServerConfig::builder()
             .with_no_client_auth()
@@ -278,7 +277,9 @@ pub fn start_mock_redis_tls_on(port: u16) -> MockRedis {
                         thread::spawn(move || {
                             stream.set_nodelay(true).ok();
                             stream.set_nonblocking(false).ok();
-                            stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
+                            stream
+                                .set_read_timeout(Some(Duration::from_millis(100)))
+                                .ok();
                             if let Ok(conn) = ServerConnection::new(tls_config) {
                                 let tls_stream = StreamOwned::new(conn, stream);
                                 let _ = handle_conn_duplex(tls_stream, store);
@@ -320,7 +321,9 @@ fn handle_conn(stream: TcpStream, store: Arc<Mutex<Store>>) -> std::io::Result<(
     stream.set_nodelay(true).ok();
     // Windows 上 accept 返回的套接字会继承监听套接字的非阻塞属性，这里显式改回阻塞
     stream.set_nonblocking(false).ok();
-    stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
     let mut writer = stream.try_clone()?;
     let mut decoder = Decoder::new(std::io::BufReader::new(stream));
     let mut subscriptions = ConnectionSubscriptions::default();
@@ -334,7 +337,10 @@ fn handle_conn(stream: TcpStream, store: Arc<Mutex<Store>>) -> std::io::Result<(
                 if matches!(
                     io.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => continue,
+                ) =>
+            {
+                continue;
+            }
             Err(_) => {
                 cleanup_connection(&store, conn_id, &mut subscriptions);
                 return Ok(());
@@ -387,7 +393,10 @@ where
                 if matches!(
                     io.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => continue,
+                ) =>
+            {
+                continue;
+            }
             Err(_) => {
                 cleanup_connection(&store, conn_id, &mut subscriptions);
                 return Ok(());
@@ -508,9 +517,10 @@ fn dispatch(
 
     // Stream 命令（XADD / XREAD / XREADGROUP / XACK / XPENDING / XCLAIM / XGROUP / XINFO / XTRIM / XDEL / XLEN / XRANGE）
     if cmd.starts_with('X')
-        && let Some(result) = dispatch_stream(&mut store, &cmd, args) {
-            return result;
-        }
+        && let Some(result) = dispatch_stream(&mut store, &cmd, args)
+    {
+        return result;
+    }
 
     match cmd.as_str() {
         "PING" => (simple("PONG"), false),
@@ -583,14 +593,31 @@ fn dispatch(
             ),
             false,
         ),
-        "PUBLISH" => (dispatch_publish(&mut store, &args[1], &args[2], false), false),
-        "SPUBLISH" => (dispatch_publish(&mut store, &args[1], &args[2], true), false),
+        "PUBLISH" => (
+            dispatch_publish(&mut store, &args[1], &args[2], false),
+            false,
+        ),
+        "SPUBLISH" => (
+            dispatch_publish(&mut store, &args[1], &args[2], true),
+            false,
+        ),
         "INFO" => {
-            let section = args.get(1).map(|arg| String::from_utf8_lossy(arg).to_ascii_lowercase());
+            let section = args
+                .get(1)
+                .map(|arg| String::from_utf8_lossy(arg).to_ascii_lowercase());
             let text = match section.as_deref() {
-                Some("replication") => store.info_replication.clone().unwrap_or_else(|| default_info(&store)),
-                Some("sentinel") => store.info_sentinel.clone().unwrap_or_else(|| default_info(&store)),
-                _ => store.info_text.clone().unwrap_or_else(|| default_info(&store)),
+                Some("replication") => store
+                    .info_replication
+                    .clone()
+                    .unwrap_or_else(|| default_info(&store)),
+                Some("sentinel") => store
+                    .info_sentinel
+                    .clone()
+                    .unwrap_or_else(|| default_info(&store)),
+                _ => store
+                    .info_text
+                    .clone()
+                    .unwrap_or_else(|| default_info(&store)),
             };
             (bulk(text.as_bytes()), false)
         }
@@ -695,7 +722,8 @@ fn dispatch(
                 .data
                 .iter()
                 .filter(|(k, e)| {
-                    e.expire_at.map(|t| t > Instant::now()).unwrap_or(true) && glob_match(pattern, k)
+                    e.expire_at.map(|t| t > Instant::now()).unwrap_or(true)
+                        && glob_match(pattern, k)
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
@@ -711,11 +739,18 @@ fn dispatch(
                 .data
                 .iter()
                 .filter(|(k, e)| {
-                    e.expire_at.map(|t| t > Instant::now()).unwrap_or(true) && glob_match(&pattern, k)
+                    e.expire_at.map(|t| t > Instant::now()).unwrap_or(true)
+                        && glob_match(&pattern, k)
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
-            (array(vec![bulk(b"0"), array(keys.iter().map(|k| bulk(k)).collect())]), false)
+            (
+                array(vec![
+                    bulk(b"0"),
+                    array(keys.iter().map(|k| bulk(k)).collect()),
+                ]),
+                false,
+            )
         }
         "RENAME" | "RENAMENX" => {
             let source = args[1].clone();
@@ -865,7 +900,11 @@ fn dispatch(
         }
         "SETBIT" => {
             let offset = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
-            let value = if parse_i64(&args[3]).unwrap_or(0) != 0 { 1 } else { 0 };
+            let value = if parse_i64(&args[3]).unwrap_or(0) != 0 {
+                1
+            } else {
+                0
+            };
             let mut data = store.str_value(&args[1]).unwrap_or_default();
             let old = bits_get(&data, offset, 1) as i64;
             bits_set(&mut data, offset, 1, value);
@@ -874,7 +913,10 @@ fn dispatch(
         }
         "GETBIT" => {
             let offset = parse_i64(&args[2]).unwrap_or(0).max(0) as usize;
-            (int(bits_get(&store.str_value(&args[1]).unwrap_or_default(), offset, 1) as i64), false)
+            (
+                int(bits_get(&store.str_value(&args[1]).unwrap_or_default(), offset, 1) as i64),
+                false,
+            )
         }
         "BITCOUNT" => {
             let data = store.str_value(&args[1]).unwrap_or_default();
@@ -917,7 +959,10 @@ fn dispatch(
             }
             (int(found), false)
         }
-        "STRLEN" => (int(store.str_value(&args[1]).map(|v| v.len()).unwrap_or(0) as i64), false),
+        "STRLEN" => (
+            int(store.str_value(&args[1]).map(|v| v.len()).unwrap_or(0) as i64),
+            false,
+        ),
         "GETRANGE" => {
             let data = store.str_value(&args[1]).unwrap_or_default();
             let start = parse_i64(&args[2]).unwrap_or(0);
@@ -1022,7 +1067,11 @@ fn dispatch(
                 .unwrap_or(0.0);
             let next = current + delta;
             let text = format!("{next}");
-            hash_set(&mut store, &args[1], vec![args[2].clone(), text.clone().into_bytes()]);
+            hash_set(
+                &mut store,
+                &args[1],
+                vec![args[2].clone(), text.clone().into_bytes()],
+            );
             (bulk(text.as_bytes()), false)
         }
         "HSTRLEN" => {
@@ -1135,7 +1184,11 @@ fn dispatch(
                     if s > e {
                         Vec::new()
                     } else {
-                        l.iter().skip(s as usize).take((e - s + 1) as usize).map(|v| bulk(v)).collect()
+                        l.iter()
+                            .skip(s as usize)
+                            .take((e - s + 1) as usize)
+                            .map(|v| bulk(v))
+                            .collect()
                     }
                 }
                 _ => Vec::new(),
@@ -1186,7 +1239,11 @@ fn dispatch(
                 let kept: VecDeque<Bytes> = if s > e {
                     VecDeque::new()
                 } else {
-                    l.iter().skip(s as usize).take((e - s + 1) as usize).cloned().collect()
+                    l.iter()
+                        .skip(s as usize)
+                        .take((e - s + 1) as usize)
+                        .cloned()
+                        .collect()
                 };
                 *l = kept;
             }
@@ -1198,7 +1255,11 @@ fn dispatch(
             let mut removed = 0i64;
             if let Some(Value::List(l)) = store.get_live(&args[1]).map(|e| &mut e.value) {
                 if count >= 0 {
-                    let limit = if count == 0 { usize::MAX } else { count as usize };
+                    let limit = if count == 0 {
+                        usize::MAX
+                    } else {
+                        count as usize
+                    };
                     let mut i = 0;
                     while i < l.len() && (removed as usize) < limit {
                         if &l[i] == value {
@@ -1455,36 +1516,34 @@ fn dispatch(
                 let member = &args[i + 1];
                 let entry = store.data.entry(args[1].clone()).or_default();
                 match &mut entry.value {
-                    Value::ZSet(items) => {
-                        match items.iter_mut().find(|(m, _)| m == member) {
-                            Some((_, s)) => {
-                                if nx {
-                                    if incr {
-                                        return (nil(), false);
-                                    }
-                                } else {
-                                    let next = if incr { *s + score } else { score };
-                                    if *s != next {
-                                        changed += 1;
-                                    }
-                                    *s = next;
-                                    incr_result = Some(next);
+                    Value::ZSet(items) => match items.iter_mut().find(|(m, _)| m == member) {
+                        Some((_, s)) => {
+                            if nx {
+                                if incr {
+                                    return (nil(), false);
                                 }
-                            }
-                            None => {
-                                if xx {
-                                    if incr {
-                                        return (nil(), false);
-                                    }
-                                } else {
-                                    items.push((member.clone(), score));
-                                    added += 1;
+                            } else {
+                                let next = if incr { *s + score } else { score };
+                                if *s != next {
                                     changed += 1;
-                                    incr_result = Some(score);
                                 }
+                                *s = next;
+                                incr_result = Some(next);
                             }
                         }
-                    }
+                        None => {
+                            if xx {
+                                if incr {
+                                    return (nil(), false);
+                                }
+                            } else {
+                                items.push((member.clone(), score));
+                                added += 1;
+                                changed += 1;
+                                incr_result = Some(score);
+                            }
+                        }
+                    },
                     Value::None => {
                         if xx {
                             if incr {
@@ -1526,10 +1585,9 @@ fn dispatch(
         }
         "ZSCORE" => {
             let score = match store.get_live(&args[1]).map(|e| &e.value) {
-                Some(Value::ZSet(items)) => items
-                    .iter()
-                    .find(|(m, _)| m == &args[2])
-                    .map(|(_, s)| *s),
+                Some(Value::ZSet(items)) => {
+                    items.iter().find(|(m, _)| m == &args[2]).map(|(_, s)| *s)
+                }
                 _ => None,
             };
             match score {
@@ -1563,7 +1621,9 @@ fn dispatch(
             let min = parse_score(&args[2]).unwrap_or(f64::NEG_INFINITY);
             let max = parse_score(&args[3]).unwrap_or(f64::INFINITY);
             let count = match store.get_live(&args[1]).map(|e| &e.value) {
-                Some(Value::ZSet(items)) => items.iter().filter(|(_, s)| *s >= min && *s <= max).count() as i64,
+                Some(Value::ZSet(items)) => {
+                    items.iter().filter(|(_, s)| *s >= min && *s <= max).count() as i64
+                }
                 _ => 0,
             };
             (int(count), false)
@@ -1636,7 +1696,10 @@ fn dispatch(
                 if cmd == "ZREVRANK" {
                     sorted.reverse();
                 }
-                rank = sorted.iter().position(|(m, _)| m == &args[2]).map(|i| i as i64);
+                rank = sorted
+                    .iter()
+                    .position(|(m, _)| m == &args[2])
+                    .map(|i| i as i64);
             }
             match rank {
                 Some(i) => (int(i), false),
@@ -1709,13 +1772,17 @@ fn dispatch(
                 match opt.as_str() {
                     "EX" => {
                         let secs = parse_i64(&args[3]).unwrap_or(0);
-                        if secs > 0 && let Some(e) = store.get_live(&args[1]) {
+                        if secs > 0
+                            && let Some(e) = store.get_live(&args[1])
+                        {
                             e.expire_at = Some(Instant::now() + Duration::from_secs(secs as u64));
                         }
                     }
                     "PX" => {
                         let ms = parse_i64(&args[3]).unwrap_or(0);
-                        if ms > 0 && let Some(e) = store.get_live(&args[1]) {
+                        if ms > 0
+                            && let Some(e) = store.get_live(&args[1])
+                        {
                             e.expire_at = Some(Instant::now() + Duration::from_millis(ms as u64));
                         }
                     }
@@ -1787,12 +1854,11 @@ fn dispatch(
                 let sub = String::from_utf8_lossy(&args[i]).to_uppercase();
                 match sub.as_str() {
                     "GET" | "SET" | "INCRBY" => {
-                        let Some((signed, bits)) = args.get(i + 1).and_then(|v| bitfield_type(v)) else {
+                        let Some((signed, bits)) = args.get(i + 1).and_then(|v| bitfield_type(v))
+                        else {
                             break;
                         };
-                        let Some(offset) = args
-                            .get(i + 2)
-                            .and_then(|v| bitfield_offset(v, bits))
+                        let Some(offset) = args.get(i + 2).and_then(|v| bitfield_offset(v, bits))
                         else {
                             break;
                         };
@@ -1808,7 +1874,11 @@ fn dispatch(
                                 results.push(bulk(old.to_string().as_bytes()));
                             } else {
                                 // INCRBY：按位宽回绕（与 Redis 默认 WRAP 行为一致）
-                                let width_mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                                let width_mask = if bits == 64 {
+                                    u64::MAX
+                                } else {
+                                    (1u64 << bits) - 1
+                                };
                                 let next = old.wrapping_add(arg);
                                 let stored = (next as u64) & width_mask;
                                 bits_set(&mut data, offset, bits, stored);
@@ -2130,12 +2200,17 @@ fn dispatch(
             };
             let numkeys = parse_i64(&args[base]).unwrap_or(0).max(0) as usize;
             let keys = args[(base + 1)..(base + 1 + numkeys).min(args.len())].to_vec();
-            let weights: Vec<f64> = match args.iter().position(|a| a.eq_ignore_ascii_case(b"WEIGHTS")) {
-                Some(i) => (0..numkeys)
-                    .map(|j| args.get(i + 1 + j).and_then(|a| parse_f64(a)).unwrap_or(1.0))
-                    .collect(),
-                None => vec![1.0; numkeys],
-            };
+            let weights: Vec<f64> =
+                match args.iter().position(|a| a.eq_ignore_ascii_case(b"WEIGHTS")) {
+                    Some(i) => (0..numkeys)
+                        .map(|j| {
+                            args.get(i + 1 + j)
+                                .and_then(|a| parse_f64(a))
+                                .unwrap_or(1.0)
+                        })
+                        .collect(),
+                    None => vec![1.0; numkeys],
+                };
             let aggregate = args
                 .iter()
                 .position(|a| a.eq_ignore_ascii_case(b"AGGREGATE"))
@@ -2247,7 +2322,11 @@ fn dispatch(
                         if items.is_empty() {
                             None
                         } else {
-                            let idx = if cmd == "BZPOPMIN" { 0 } else { items.len() - 1 };
+                            let idx = if cmd == "BZPOPMIN" {
+                                0
+                            } else {
+                                items.len() - 1
+                            };
                             Some(items.remove(idx))
                         }
                     }
@@ -2255,11 +2334,7 @@ fn dispatch(
                 };
                 if let Some((m, s)) = popped {
                     return (
-                        array(vec![
-                            bulk(key),
-                            bulk(&m),
-                            bulk(format!("{s}").as_bytes()),
-                        ]),
+                        array(vec![bulk(key), bulk(&m), bulk(format!("{s}").as_bytes())]),
                         false,
                     );
                 }
@@ -2461,8 +2536,10 @@ fn dispatch(
             let sub = String::from_utf8_lossy(&args[1]).to_uppercase();
             match sub.as_str() {
                 "LOAD" => {
-                    let code = String::from_utf8_lossy(args.last().map(|v| v.as_slice()).unwrap_or_default())
-                        .to_string();
+                    let code = String::from_utf8_lossy(
+                        args.last().map(|v| v.as_slice()).unwrap_or_default(),
+                    )
+                    .to_string();
                     let name = code
                         .lines()
                         .next()
@@ -2482,7 +2559,12 @@ fn dispatch(
                     let libs: Vec<Bytes> = store
                         .functions
                         .iter()
-                        .filter(|n| filter.as_ref().map(|f| f.as_slice() == n.as_bytes()).unwrap_or(true))
+                        .filter(|n| {
+                            filter
+                                .as_ref()
+                                .map(|f| f.as_slice() == n.as_bytes())
+                                .unwrap_or(true)
+                        })
                         .map(|n| {
                             array(vec![
                                 bulk(b"library_name"),
@@ -2512,11 +2594,7 @@ fn dispatch(
                 .get(1)
                 .map(|v| String::from_utf8_lossy(v).to_string())
                 .unwrap_or_default();
-            let numkeys = args
-                .get(2)
-                .and_then(|v| parse_i64(v))
-                .unwrap_or(0)
-                .max(0) as usize;
+            let numkeys = args.get(2).and_then(|v| parse_i64(v)).unwrap_or(0).max(0) as usize;
             if function.contains("echo") {
                 match args.get(3 + numkeys).cloned() {
                     Some(v) => (bulk(&v), false),
@@ -2537,11 +2615,8 @@ fn dispatch(
                     (ok(), false)
                 }
                 "GET" => {
-                    let count = args
-                        .get(2)
-                        .and_then(|a| parse_i64(a))
-                        .unwrap_or(10)
-                        .max(0) as usize;
+                    let count =
+                        args.get(2).and_then(|a| parse_i64(a)).unwrap_or(10).max(0) as usize;
                     let entries: Vec<Bytes> = store
                         .slowlog
                         .iter()
@@ -2581,12 +2656,7 @@ fn dispatch(
                         .latency
                         .iter()
                         .map(|(e, ts, latest, max)| {
-                            array(vec![
-                                bulk(e.as_bytes()),
-                                int(*ts),
-                                int(*latest),
-                                int(*max),
-                            ])
+                            array(vec![bulk(e.as_bytes()), int(*ts), int(*latest), int(*max)])
                         })
                         .collect();
                     (array(items), false)
@@ -2654,7 +2724,10 @@ fn dispatch(
         }
 
         _ => (
-            error(&format!("ERR unknown command '{}'", String::from_utf8_lossy(&args[0]))),
+            error(&format!(
+                "ERR unknown command '{}'",
+                String::from_utf8_lossy(&args[0])
+            )),
             false,
         ),
     }
@@ -2667,7 +2740,10 @@ enum SubscriptionKind {
     Shard,
 }
 
-fn drain_pubsub_messages<W: std::io::Write>(writer: &mut W, receiver: &Receiver<Bytes>) -> std::io::Result<()> {
+fn drain_pubsub_messages<W: std::io::Write>(
+    writer: &mut W,
+    receiver: &Receiver<Bytes>,
+) -> std::io::Result<()> {
     loop {
         match receiver.try_recv() {
             Ok(message) => {
@@ -2727,13 +2803,20 @@ fn unsubscribe_kind(
     kind: SubscriptionKind,
 ) -> Bytes {
     let targets: Vec<Bytes> = if entries.is_empty() {
-        subscription_bucket(subscriptions, kind).iter().cloned().collect()
+        subscription_bucket(subscriptions, kind)
+            .iter()
+            .cloned()
+            .collect()
     } else {
         entries.to_vec()
     };
 
     if targets.is_empty() {
-        return array(vec![bulk(action), nil(), int(total_subscriptions(subscriptions) as i64)]);
+        return array(vec![
+            bulk(action),
+            nil(),
+            int(total_subscriptions(subscriptions) as i64),
+        ]);
     }
 
     let mut replies = Vec::new();
@@ -2790,7 +2873,11 @@ fn dispatch_publish(store: &mut Store, channel: &[u8], message: &[u8], shard: bo
                 bulk(message),
             ]);
             for connection_id in subscribers {
-                if send_pubsub_message(&store.pubsub.connections, connection_id, pattern_payload.clone()) {
+                if send_pubsub_message(
+                    &store.pubsub.connections,
+                    connection_id,
+                    pattern_payload.clone(),
+                ) {
                     delivered += 1;
                 } else {
                     stale.push((connection_id, SubscriptionKind::Pattern, pattern.clone()));
@@ -2801,9 +2888,15 @@ fn dispatch_publish(store: &mut Store, channel: &[u8], message: &[u8], shard: bo
 
     for (connection_id, kind, entry) in stale {
         match kind {
-            SubscriptionKind::Channel => remove_subscriber(&mut store.pubsub.channels, &entry, connection_id),
-            SubscriptionKind::Pattern => remove_subscriber(&mut store.pubsub.patterns, &entry, connection_id),
-            SubscriptionKind::Shard => remove_subscriber(&mut store.pubsub.shards, &entry, connection_id),
+            SubscriptionKind::Channel => {
+                remove_subscriber(&mut store.pubsub.channels, &entry, connection_id)
+            }
+            SubscriptionKind::Pattern => {
+                remove_subscriber(&mut store.pubsub.patterns, &entry, connection_id)
+            }
+            SubscriptionKind::Shard => {
+                remove_subscriber(&mut store.pubsub.shards, &entry, connection_id)
+            }
         }
         store.pubsub.connections.remove(&connection_id);
     }
@@ -2812,7 +2905,10 @@ fn dispatch_publish(store: &mut Store, channel: &[u8], message: &[u8], shard: bo
 }
 
 fn dispatch_pubsub_introspection(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
-    let Some(subcommand) = args.get(1).map(|arg| String::from_utf8_lossy(arg).to_uppercase()) else {
+    let Some(subcommand) = args
+        .get(1)
+        .map(|arg| String::from_utf8_lossy(arg).to_uppercase())
+    else {
         return (error("ERR unknown PUBSUB subcommand"), false);
     };
 
@@ -2830,7 +2926,10 @@ fn dispatch_pubsub_introspection(store: &mut Store, args: &[Bytes]) -> (Bytes, b
                 channels.retain(|channel| glob_match(&pattern, channel));
             }
             channels.sort();
-            (array(channels.iter().map(|channel| bulk(channel)).collect()), false)
+            (
+                array(channels.iter().map(|channel| bulk(channel)).collect()),
+                false,
+            )
         }
         "NUMSUB" => {
             let mut items = Vec::new();
@@ -2847,7 +2946,12 @@ fn dispatch_pubsub_introspection(store: &mut Store, args: &[Bytes]) -> (Bytes, b
             (array(items), false)
         }
         "NUMPAT" => {
-            let count: usize = store.pubsub.patterns.values().map(|subscribers| subscribers.len()).sum();
+            let count: usize = store
+                .pubsub
+                .patterns
+                .values()
+                .map(|subscribers| subscribers.len())
+                .sum();
             (int(count as i64), false)
         }
         _ => (error("ERR unknown PUBSUB subcommand"), false),
@@ -2864,17 +2968,32 @@ fn add_subscription(
     match kind {
         SubscriptionKind::Channel => {
             if subscriptions.channels.insert(entry.clone()) {
-                store.pubsub.channels.entry(entry).or_default().insert(connection_id);
+                store
+                    .pubsub
+                    .channels
+                    .entry(entry)
+                    .or_default()
+                    .insert(connection_id);
             }
         }
         SubscriptionKind::Pattern => {
             if subscriptions.patterns.insert(entry.clone()) {
-                store.pubsub.patterns.entry(entry).or_default().insert(connection_id);
+                store
+                    .pubsub
+                    .patterns
+                    .entry(entry)
+                    .or_default()
+                    .insert(connection_id);
             }
         }
         SubscriptionKind::Shard => {
             if subscriptions.shards.insert(entry.clone()) {
-                store.pubsub.shards.entry(entry).or_default().insert(connection_id);
+                store
+                    .pubsub
+                    .shards
+                    .entry(entry)
+                    .or_default()
+                    .insert(connection_id);
             }
         }
     }
@@ -3001,9 +3120,10 @@ fn dispatch_set(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
 
     store.set_str(key, value.clone());
     if let Some(ttl) = expire
-        && let Some(e) = store.get_live(key) {
-            e.expire_at = Some(Instant::now() + ttl);
-        }
+        && let Some(e) = store.get_live(key)
+    {
+        e.expire_at = Some(Instant::now() + ttl);
+    }
 
     if get {
         match old {
@@ -3172,18 +3292,27 @@ fn parse_maxlen(args: &[Bytes], mut i: usize) -> (Option<u64>, usize) {
 
 fn xadd(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
     if args.len() < 4 {
-        return (error("ERR wrong number of arguments for 'xadd' command"), false);
+        return (
+            error("ERR wrong number of arguments for 'xadd' command"),
+            false,
+        );
     }
 
     let (maxlen, i) = parse_maxlen(args, 2);
     if i >= args.len() {
-        return (error("ERR wrong number of arguments for 'xadd' command"), false);
+        return (
+            error("ERR wrong number of arguments for 'xadd' command"),
+            false,
+        );
     }
 
     let id_token = String::from_utf8_lossy(&args[i]).to_string();
     let mut i = i + 1;
     if i >= args.len() || !(args.len() - i).is_multiple_of(2) {
-        return (error("ERR wrong number of arguments for 'xadd' command"), false);
+        return (
+            error("ERR wrong number of arguments for 'xadd' command"),
+            false,
+        );
     }
 
     let state = ensure_stream(store, &args[1]);
@@ -3223,7 +3352,9 @@ fn xadd(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
 }
 
 fn xlen(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
-    let len = get_stream(store, &args[1]).map(|s| s.entries.len()).unwrap_or(0);
+    let len = get_stream(store, &args[1])
+        .map(|s| s.entries.len())
+        .unwrap_or(0);
     (int(len as i64), false)
 }
 
@@ -3245,7 +3376,11 @@ fn xrange(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
         .entries
         .iter()
         .filter(|e| (e.ms, e.seq) >= start && (e.ms, e.seq) <= end)
-        .take(if count > 0 { count as usize } else { usize::MAX })
+        .take(if count > 0 {
+            count as usize
+        } else {
+            usize::MAX
+        })
         .map(stream_entry_frame)
         .collect();
 
@@ -3279,7 +3414,10 @@ fn xtrim(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
         i += 1;
     }
     let Some(value) = args.get(i) else {
-        return (error("ERR wrong number of arguments for 'xtrim' command"), false);
+        return (
+            error("ERR wrong number of arguments for 'xtrim' command"),
+            false,
+        );
     };
 
     let mut removed = 0;
@@ -3337,7 +3475,11 @@ fn xread(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
         .entries
         .iter()
         .filter(|e| (e.ms, e.seq) > from)
-        .take(if count > 0 { count as usize } else { usize::MAX })
+        .take(if count > 0 {
+            count as usize
+        } else {
+            usize::MAX
+        })
         .map(stream_entry_frame)
         .collect();
 
@@ -3367,7 +3509,11 @@ fn xreadgroup(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
         .and_then(|i| args.get(i + 1))
         .and_then(|a| parse_i64(a))
         .unwrap_or(-1);
-    let take = if count > 0 { count as usize } else { usize::MAX };
+    let take = if count > 0 {
+        count as usize
+    } else {
+        usize::MAX
+    };
 
     let Some(state) = get_stream(store, &key) else {
         return (no_group_error(), false);
@@ -3430,11 +3576,7 @@ fn xreadgroup(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
         }
 
         for id in &ids {
-            if let Some(entry) = state
-                .entries
-                .iter()
-                .find(|e| e.ms == id.0 && e.seq == id.1)
-            {
+            if let Some(entry) = state.entries.iter().find(|e| e.ms == id.0 && e.seq == id.1) {
                 items.push(stream_entry_frame(entry));
             }
         }
@@ -3522,7 +3664,11 @@ fn xpending(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
     let items: Vec<Bytes> = sorted
         .into_iter()
         .filter(|p| (p.ms, p.seq) >= start && (p.ms, p.seq) <= end)
-        .take(if count > 0 { count as usize } else { usize::MAX })
+        .take(if count > 0 {
+            count as usize
+        } else {
+            usize::MAX
+        })
         .map(|p| {
             array(vec![
                 bulk(p.id().as_bytes()),
@@ -3562,10 +3708,17 @@ fn xclaim(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
 
     let mut items: Vec<Bytes> = Vec::new();
     for id in &args[5..] {
-        if id.eq_ignore_ascii_case(b"JUSTID") || id.eq_ignore_ascii_case(b"IDLE") || id.eq_ignore_ascii_case(b"TIME") || id.eq_ignore_ascii_case(b"RETRYCOUNT") || id.eq_ignore_ascii_case(b"FORCE") {
+        if id.eq_ignore_ascii_case(b"JUSTID")
+            || id.eq_ignore_ascii_case(b"IDLE")
+            || id.eq_ignore_ascii_case(b"TIME")
+            || id.eq_ignore_ascii_case(b"RETRYCOUNT")
+            || id.eq_ignore_ascii_case(b"FORCE")
+        {
             continue;
         }
-        let Some(v) = parse_stream_id(id) else { continue };
+        let Some(v) = parse_stream_id(id) else {
+            continue;
+        };
 
         let claimed = {
             let group = &mut state.groups[gidx];
@@ -3584,10 +3737,9 @@ fn xclaim(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
             }
         };
 
-        if claimed
-            && let Some(entry) = state.entries.iter().find(|e| e.ms == v.0 && e.seq == v.1) {
-                items.push(stream_entry_frame(entry));
-            }
+        if claimed && let Some(entry) = state.entries.iter().find(|e| e.ms == v.0 && e.seq == v.1) {
+            items.push(stream_entry_frame(entry));
+        }
     }
 
     (array(items), false)
@@ -3603,9 +3755,15 @@ fn xgroup(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
             let start = args.get(4).cloned().unwrap_or_else(|| b"0".to_vec());
             let mkstream = args.iter().any(|a| a.eq_ignore_ascii_case(b"MKSTREAM"));
 
-            let exists = matches!(store.data.get(&key).map(|e| &e.value), Some(Value::Stream(_)));
+            let exists = matches!(
+                store.data.get(&key).map(|e| &e.value),
+                Some(Value::Stream(_))
+            );
             if !exists && !mkstream {
-                return (error("ERR The XGROUP subcommand requires the key to exist"), false);
+                return (
+                    error("ERR The XGROUP subcommand requires the key to exist"),
+                    false,
+                );
             }
 
             let state = ensure_stream(store, &key);
@@ -3636,8 +3794,12 @@ fn xgroup(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
             (int((before - state.groups.len()) as i64), false)
         }
         "DELCONSUMER" => {
-            let Some(consumer_name) = args.get(4).map(|a| String::from_utf8_lossy(a).to_string()) else {
-                return (error("ERR wrong number of arguments for 'xgroup' command"), false);
+            let Some(consumer_name) = args.get(4).map(|a| String::from_utf8_lossy(a).to_string())
+            else {
+                return (
+                    error("ERR wrong number of arguments for 'xgroup' command"),
+                    false,
+                );
             };
             let Some(state) = get_stream(store, &key) else {
                 return (no_group_error(), false);
@@ -3647,7 +3809,11 @@ fn xgroup(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
             };
 
             let group = &mut state.groups[gidx];
-            let pending_count = group.pending.iter().filter(|p| p.consumer == consumer_name).count();
+            let pending_count = group
+                .pending
+                .iter()
+                .filter(|p| p.consumer == consumer_name)
+                .count();
             group.pending.retain(|p| p.consumer != consumer_name);
             group.consumers.retain(|c| c.name != consumer_name);
             (int(pending_count as i64), false)
@@ -3683,8 +3849,16 @@ fn xinfo(store: &mut Store, args: &[Bytes]) -> (Bytes, bool) {
             };
 
             let last_id = format!("{}-{}", state.last_id.0, state.last_id.1);
-            let first = state.entries.front().map(stream_entry_frame).unwrap_or_else(nil);
-            let last = state.entries.back().map(stream_entry_frame).unwrap_or_else(nil);
+            let first = state
+                .entries
+                .front()
+                .map(stream_entry_frame)
+                .unwrap_or_else(nil);
+            let last = state
+                .entries
+                .back()
+                .map(stream_entry_frame)
+                .unwrap_or_else(nil);
 
             let items: Vec<Bytes> = vec![
                 bulk(b"length"),
@@ -3813,7 +3987,10 @@ fn estimate_memory_usage(value: &Value) -> usize {
         Value::None => 0,
         Value::Str(bytes) => bytes.len(),
         Value::List(items) => items.iter().map(|item| item.len()).sum(),
-        Value::Hash(items) => items.iter().map(|(key, value)| key.len() + value.len()).sum(),
+        Value::Hash(items) => items
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum(),
         Value::Set(items) => items.iter().map(|item| item.len()).sum(),
         Value::ZSet(items) => items
             .iter()
@@ -3900,9 +4077,10 @@ pub fn set_raw(server: &MockRedis, key: &str, value: &str, ttl_seconds: i64) {
     let mut store = server.store.lock().unwrap();
     store.set_str(key.as_bytes(), value.as_bytes().to_vec());
     if ttl_seconds > 0
-        && let Some(e) = store.get_live(key.as_bytes()) {
-            e.expire_at = Some(Instant::now() + Duration::from_secs(ttl_seconds as u64));
-        }
+        && let Some(e) = store.get_live(key.as_bytes())
+    {
+        e.expire_at = Some(Instant::now() + Duration::from_secs(ttl_seconds as u64));
+    }
 }
 
 /// 对指定 key 预置一次性重定向错误（如 `MOVED ...` / `ASK ...`）。
@@ -3985,7 +4163,9 @@ pub fn seed_slowlog(
 /// 预置延迟统计（供 `LATENCY` 测试）。
 pub fn seed_latency(server: &MockRedis, event: &str, timestamp: i64, latest: i64, max: i64) {
     let mut store = server.store.lock().unwrap();
-    store.latency.push((event.to_string(), timestamp, latest, max));
+    store
+        .latency
+        .push((event.to_string(), timestamp, latest, max));
 }
 
 /// 按分数（同分按成员字典序）排序 zset。

@@ -14,7 +14,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 use pek_rredis::encoder::Json;
-use pek_rredis::{FullRedis, FromRedisPayload, ToRedisPayload};
+use pek_rredis::{FromRedisPayload, FullRedis, ToRedisPayload};
 
 use support::{exists, list_len, mock_full, raw_get};
 
@@ -85,11 +85,8 @@ fn set_get_expire_and_batch_operations() {
     assert!(rds.get_expire("k1").unwrap() > 0);
 
     // 批量写入/读取
-    rds.set_all(
-        &[("a", "1"), ("b", "2"), ("c", "3")],
-        60,
-    )
-    .unwrap();
+    rds.set_all(&[("a", "1"), ("b", "2"), ("c", "3")], 60)
+        .unwrap();
     assert_eq!(rds.get_string("a").unwrap().as_deref(), Some("1"));
     let dic = rds.get_all::<i32>(&["a", "b", "c", "missing"]).unwrap();
     assert_eq!(dic.get("a"), Some(&1));
@@ -256,7 +253,9 @@ fn simple_queue_is_fifo_and_supports_batch_take() {
     let (_server, full) = mock_full();
     let queue = full.get_queue::<String>("q:orders");
 
-    queue.add_many(&["a".into(), "b".into(), "c".into()]).unwrap();
+    queue
+        .add_many(&["a".into(), "b".into(), "c".into()])
+        .unwrap();
     assert_eq!(queue.count().unwrap(), 3);
 
     // 管道批量消费：左进右出，顺序为 a、b、c
@@ -333,7 +332,9 @@ fn reliable_queue_publish_and_consume_kv_pair() {
     let mut queue = full.get_reliable_queue::<String>("rq3:kv");
     queue.retry_interval_seconds = 0;
 
-    queue.publish(&[("msg:001", &"hello".to_string())], 120).unwrap();
+    queue
+        .publish(&[("msg:001", &"hello".to_string())], 120)
+        .unwrap();
 
     let handled = queue
         .consume(-1, |msg| {
@@ -384,6 +385,29 @@ fn delay_queue_delivers_due_messages_and_transfers() {
     assert_eq!(target.take(10).unwrap(), vec!["d1", "d2"]);
     assert_eq!(delay.count().unwrap(), 1);
     assert!(exists(&server, "dq:orders"));
+}
+
+#[test]
+fn reliable_add_delay_auto_transfers_to_main_queue() {
+    let (server, full) = mock_full();
+    let mut queue = full.get_reliable_queue::<String>("rq:auto-delay");
+    queue.delay_transfer_interval_seconds = 1;
+
+    // delay=0 → 立即到期；add_delay 会自动拉起基于 DH.RustBase 定时器的转移 worker
+    queue.add_delay(&"m1".to_string(), 0).unwrap();
+
+    // 等待 worker 把到期消息转移到主队列（首轮立即执行，最坏等一个 1s 周期）
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    while queue.count().unwrap() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "到期消息未被自动转移到主队列"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(queue.take(10).unwrap(), vec!["m1"]);
+    assert!(exists(&server, "rq:auto-delay"));
 }
 
 // ================== 分布式锁 ==================
@@ -505,7 +529,9 @@ fn stream_reads_csharp_style_written_messages() {
     let msgs = stream.range(Some("-"), Some("+"), 10).unwrap();
     assert_eq!(msgs[0].id, "1695792000000-0");
 
-    let order = msgs[0].to_struct::<StreamOrder>().expect("应能映射为结构体");
+    let order = msgs[0]
+        .to_struct::<StreamOrder>()
+        .expect("应能映射为结构体");
     assert_eq!(
         order,
         StreamOrder {
@@ -555,8 +581,12 @@ fn stream_group_consume_ack_and_status() {
 
     let msgs = stream.take_messages(10, 0).unwrap();
     assert_eq!(msgs.len(), 3);
-    assert_eq!(msgs.iter().map(|m| m.primitive::<String>()).collect::<Vec<_>>(),
-        vec![Some("m-1".into()), Some("m-2".into()), Some("m-3".into())]);
+    assert_eq!(
+        msgs.iter()
+            .map(|m| m.primitive::<String>())
+            .collect::<Vec<_>>(),
+        vec![Some("m-1".into()), Some("m-2".into()), Some("m-3".into())]
+    );
 
     // 未确认 → 挂起 3 条，且能查到消费者
     let pending = stream.pending_info("g1").unwrap().unwrap();

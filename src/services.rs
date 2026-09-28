@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use chrono::Duration as ChronoDuration;
@@ -124,10 +124,7 @@ pub fn acquire_red_lock(
 
         // 尝试在每个实例上加锁（单实例失败不中断）
         for rds in instances {
-            if let Ok(true) =
-                rds.redis()
-                    .set(key, token.as_str(), expire_seconds)
-            {
+            if let Ok(true) = rds.redis().set(key, token.as_str(), expire_seconds) {
                 locked.push(rds.clone());
             }
         }
@@ -187,7 +184,7 @@ pub type ServiceCallbackResult<T = ()> = std::result::Result<T, ServiceError>;
 /// Redis 延迟批处理器（对齐 DH.NRedis `Services.RedisDeferred`）。
 ///
 /// Rust 侧不内置计时器线程，而是暴露 `process_once` / `run`，由调用方决定放在线程、tokio
-/// 任务或宿主框架的定时器里执行。
+/// 任务或宿主框架的定时器里执行——可直接用 DH.RustBase 的 `dhrust::threading::Timer` 驱动。
 pub struct RedisDeferred {
     name: String,
     pending: RedisSet<String>,
@@ -274,7 +271,7 @@ impl RedisDeferred {
 /// - 统计值写在主库的 HASH；
 /// - 待处理 key 进入备份库的延迟队列/可靠队列；
 /// - 消费时对 HASH 先重命名做快照，再回调保存；
-/// - 延迟转移与可靠消费分开暴露，便于按 Rust 宿主模型自行放在线程或 tokio 中运行。
+/// - 延迟转移与可靠消费分开暴露，便于按 Rust 宿主模型自行放在线程、tokio 或 DH.RustBase 定时器中运行。
 pub struct RedisStat {
     name: String,
     redis: FullRedis,
@@ -321,18 +318,23 @@ impl RedisStat {
     /// 把 key 放入延迟队列；利用 `exists:{key}` 做 10 分钟去重。
     pub fn add_delay_queue(&self, key: &str, delay_seconds: i64) -> Result<i64> {
         let exists_key = format!("exists:{key}");
-        let added = self.redis.add(&exists_key, Local::now().naive_local(), 600)?;
+        let added = self
+            .redis
+            .add(&exists_key, Local::now().naive_local(), 600)?;
         if added {
-            self.reliable_queue().add_delay(&key.to_string(), delay_seconds)
+            self.reliable_queue()
+                .add_delay(&key.to_string(), delay_seconds)
         } else {
             Ok(0)
         }
     }
 
-    /// 把到期延迟消息转移到主可靠队列；建议单独放在线程或 tokio 任务中运行。
+    /// 把到期延迟消息转移到主可靠队列；建议单独放在线程、tokio 任务或 DH.RustBase 定时器中运行。
     pub fn transfer_due(&self, cancel: Arc<AtomicBool>) -> Result<()> {
         let reliable = self.reliable_queue();
-        reliable.delay_queue().transfer_loop(&self.plain_queue(), cancel)
+        reliable
+            .delay_queue()
+            .transfer_loop(&self.plain_queue(), cancel)
     }
 
     /// 立即转移一批已到期延迟消息到主可靠队列，返回转移条数。
@@ -390,11 +392,12 @@ impl RedisStat {
     where
         F: FnMut(&str, HashMap<String, i32>) -> ServiceCallbackResult,
     {
-        self.reliable_queue().consume_raw(timeout_seconds, poll_interval, cancel, |key| {
-            self.process_key(key, &mut on_save)
-                .map(|_| ())
-                .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as ServiceError)
-        })
+        self.reliable_queue()
+            .consume_raw(timeout_seconds, poll_interval, cancel, |key| {
+                self.process_key(key, &mut on_save)
+                    .map(|_| ())
+                    .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as ServiceError)
+            })
     }
 
     /// 处理一条统计 key，成功保存后返回 `true`，超时/无消息返回 `false`。
@@ -417,6 +420,7 @@ impl RedisStat {
 /// Rust 侧不复刻 `.NET EventBus<T>`/DI/本地订阅注册模型，而是提供：
 /// - `publish`：写入 Stream；
 /// - `consume_once` / `consume_loop`：按消费组读取并在成功后确认；
+///
 /// 调用方可用当前语言/框架自己的回调注册、channel 或 actor 机制做进程内分发。
 pub struct RedisEventBus<T> {
     stream: Mutex<RedisStream>,
@@ -648,14 +652,16 @@ mod tests {
             )
             .unwrap();
 
-        let bus = RedisEventBus::<EventDemo>::new(redis.clone(), "events:retention", "group-r").unwrap();
+        let bus =
+            RedisEventBus::<EventDemo>::new(redis.clone(), "events:retention", "group-r").unwrap();
         bus.set_expire(Some(Duration::from_secs(1)));
         bus.set_maintenance_interval(Duration::ZERO);
-        let new_id = bus.publish(&EventDemo {
-            name: "new".into(),
-            count: 2,
-        })
-        .unwrap();
+        let new_id = bus
+            .publish(&EventDemo {
+                name: "new".into(),
+                count: 2,
+            })
+            .unwrap();
 
         let stream = redis.get_stream("events:retention");
         assert_eq!(stream.count().unwrap(), 1);
@@ -739,11 +745,16 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let consume_cancel = cancel.clone();
         let consumer = thread::spawn(move || {
-            stat.consume_loop(-1, Duration::from_millis(10), consume_cancel.as_ref(), |key, data| {
-                tx.send((key.to_string(), data)).unwrap();
-                cancel.store(true, Ordering::SeqCst);
-                Ok(())
-            })
+            stat.consume_loop(
+                -1,
+                Duration::from_millis(10),
+                consume_cancel.as_ref(),
+                |key, data| {
+                    tx.send((key.to_string(), data)).unwrap();
+                    cancel.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
         });
 
         let (key, data) = rx.recv_timeout(Duration::from_secs(3)).unwrap();

@@ -114,15 +114,27 @@ impl RedisGeo {
         }
 
         let mut result = Vec::with_capacity(members.len());
-        for item in self.redis.redis().execute(&args)?.into_array().unwrap_or_default() {
+        for item in self
+            .redis
+            .redis()
+            .execute(&args)?
+            .into_array()
+            .unwrap_or_default()
+        {
             if item.is_null() {
                 result.push(None);
                 continue;
             }
 
             let coords = item.into_array().unwrap_or_default();
-            let lon = coords.first().and_then(|v| v.as_string()).and_then(|s| s.parse().ok());
-            let lat = coords.get(1).and_then(|v| v.as_string()).and_then(|s| s.parse().ok());
+            let lon = coords
+                .first()
+                .and_then(|v| v.as_string())
+                .and_then(|s| s.parse().ok());
+            let lat = coords
+                .get(1)
+                .and_then(|v| v.as_string())
+                .and_then(|s| s.parse().ok());
             result.push(match (lon, lat) {
                 (Some(lon), Some(lat)) => Some((lon, lat)),
                 _ => None,
@@ -240,7 +252,11 @@ impl RedisGeo {
         args.push(b"BYRADIUS".to_vec());
         args.push(crate::encoder::format_f64(radius).into_bytes());
         args.push(unit.as_bytes().to_vec());
-        args.push(if ascending { b"ASC".to_vec() } else { b"DESC".to_vec() });
+        args.push(if ascending {
+            b"ASC".to_vec()
+        } else {
+            b"DESC".to_vec()
+        });
         args.push(b"WITHDIST".to_vec());
         args.push(b"WITHCOORD".to_vec());
         if count > 0 {
@@ -282,13 +298,19 @@ impl RedisGeo {
             args.push(crate::encoder::format_f64(lon).into_bytes());
             args.push(crate::encoder::format_f64(lat).into_bytes());
         } else {
-            return Err(Error::Type("GEOSEARCHSTORE 需要 member 或经纬度中心点".into()));
+            return Err(Error::Type(
+                "GEOSEARCHSTORE 需要 member 或经纬度中心点".into(),
+            ));
         }
 
         args.push(b"BYRADIUS".to_vec());
         args.push(crate::encoder::format_f64(radius).into_bytes());
         args.push(unit.as_bytes().to_vec());
-        args.push(if ascending { b"ASC".to_vec() } else { b"DESC".to_vec() });
+        args.push(if ascending {
+            b"ASC".to_vec()
+        } else {
+            b"DESC".to_vec()
+        });
         if count > 0 {
             args.push(b"COUNT".to_vec());
             args.push(count.to_string().into_bytes());
@@ -336,10 +358,17 @@ fn parse_geo_array(value: crate::resp::RespValue) -> Result<Vec<GeoMember>> {
         };
 
         if let Some(coords) = parts.get(2).and_then(|v| v.clone().into_array())
-            && coords.len() >= 2 {
-                member.longitude = coords[0].as_string().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                member.latitude = coords[1].as_string().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            }
+            && coords.len() >= 2
+        {
+            member.longitude = coords[0]
+                .as_string()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            member.latitude = coords[1]
+                .as_string()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+        }
 
         list.push(member);
     }

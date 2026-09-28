@@ -35,7 +35,12 @@ where
 
     /// 元素个数（`LLEN`）。
     pub fn len(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"LLEN", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"LLEN", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -91,13 +96,19 @@ where
 
     /// 尾部弹出（`RPOP`）。
     pub fn pop_back(&self) -> Result<Option<V>> {
-        let rs = self.redis.redis().execute(&[b"RPOP", self.key.as_bytes()])?;
+        let rs = self
+            .redis
+            .redis()
+            .execute(&[b"RPOP", self.key.as_bytes()])?;
         Ok(decode(rs))
     }
 
     /// 头部弹出（`LPOP`）。
     pub fn pop_front(&self) -> Result<Option<V>> {
-        let rs = self.redis.redis().execute(&[b"LPOP", self.key.as_bytes()])?;
+        let rs = self
+            .redis
+            .redis()
+            .execute(&[b"LPOP", self.key.as_bytes()])?;
         Ok(decode(rs))
     }
 
@@ -189,10 +200,10 @@ where
     /// 删除并返回最右侧元素并插入目标列表左侧（`RPOPLPUSH`，高可靠消费）。
     pub fn rpoplpush(&self, destination: &str) -> Result<Option<V>> {
         let dest = self.redis.get_key(destination);
-        let rs = self
-            .redis
-            .redis()
-            .execute(&[b"RPOPLPUSH", self.key.as_bytes(), dest.as_bytes()])?;
+        let rs =
+            self.redis
+                .redis()
+                .execute(&[b"RPOPLPUSH", self.key.as_bytes(), dest.as_bytes()])?;
         Ok(decode(rs))
     }
 

@@ -117,8 +117,18 @@ impl RedisClusterTopology {
             .collect();
 
         nodes.sort_by(|a, b| {
-            let a_slot = a.slots.iter().map(|slot| slot.from).min().unwrap_or(u16::MAX);
-            let b_slot = b.slots.iter().map(|slot| slot.from).min().unwrap_or(u16::MAX);
+            let a_slot = a
+                .slots
+                .iter()
+                .map(|slot| slot.from)
+                .min()
+                .unwrap_or(u16::MAX);
+            let b_slot = b
+                .slots
+                .iter()
+                .map(|slot| slot.from)
+                .min()
+                .unwrap_or(u16::MAX);
             a_slot
                 .cmp(&b_slot)
                 .then_with(|| a.is_replica.cmp(&b.is_replica))
@@ -140,7 +150,10 @@ impl RedisClusterTopology {
 
     /// 按 endpoint 映射到已知节点。
     pub fn map_endpoint(&self, endpoint: &str) -> Option<ClusterNode> {
-        self.nodes.iter().find(|node| node.endpoint == endpoint).cloned()
+        self.nodes
+            .iter()
+            .find(|node| node.endpoint == endpoint)
+            .cloned()
     }
 
     fn redirected_node(&self, slot: u16, endpoint: &str) -> ClusterNode {
@@ -177,11 +190,8 @@ impl RedisClusterTopology {
         }
 
         if self.read_from_replicas {
-            let replicas: Vec<ClusterNode> = all
-                .iter()
-                .filter(|node| node.is_replica)
-                .cloned()
-                .collect();
+            let replicas: Vec<ClusterNode> =
+                all.iter().filter(|node| node.is_replica).cloned().collect();
             if !replicas.is_empty() {
                 return self.health.prefer_available(replicas);
             }
@@ -323,12 +333,7 @@ impl Topology for RedisReplicationTopology {
         self.preferred_nodes(write).into_iter().next()
     }
 
-    fn reselect_node(
-        &self,
-        _key: &str,
-        write: bool,
-        current: &ClusterNode,
-    ) -> Option<ClusterNode> {
+    fn reselect_node(&self, _key: &str, write: bool, current: &ClusterNode) -> Option<ClusterNode> {
         self.health.mark_failure(&current.endpoint);
         self.preferred_nodes(write)
             .into_iter()
@@ -410,7 +415,9 @@ impl Topology for StaticTopology {
                 self.nodes
                     .iter()
                     .find(|node| {
-                        node.link_up && node.contains_slot(slot) && node.endpoint != current.endpoint
+                        node.link_up
+                            && node.contains_slot(slot)
+                            && node.endpoint != current.endpoint
                     })
                     .cloned()
             })
@@ -434,7 +441,8 @@ mod tests {
         replica.is_replica = true;
         replica.slots.push(SlotRange::new(slot, slot));
 
-        let topology = StaticTopology::new(ServerMode::Cluster, vec![replica, primary.clone()], true);
+        let topology =
+            StaticTopology::new(ServerMode::Cluster, vec![replica, primary.clone()], true);
         let selected = topology.select_node("{order}:1", true).unwrap();
         assert_eq!(selected.endpoint, primary.endpoint);
     }
@@ -449,7 +457,8 @@ mod tests {
         replica.is_replica = true;
         replica.slots.push(SlotRange::new(slot, slot));
 
-        let topology = StaticTopology::new(ServerMode::Cluster, vec![replica.clone(), primary], true);
+        let topology =
+            StaticTopology::new(ServerMode::Cluster, vec![replica.clone(), primary], true);
         let selected = topology.select_node("{order}:1", false).unwrap();
         assert_eq!(selected.endpoint, replica.endpoint);
     }

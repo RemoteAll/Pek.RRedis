@@ -46,7 +46,10 @@ impl QueueSettings {
         }
 
         let needle = format!("\"{name}\":");
-        if !text.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()) {
+        if !text
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase())
+        {
             let mut out = String::with_capacity(text.len() + name.len() + value.len() + 8);
             out.push_str(&text[..text.len() - 1]);
             out.push_str(&format!(",\"{name}\":\"{value}\"}}"));
@@ -99,7 +102,10 @@ mod tests {
             ..Default::default()
         };
         let out = s.attach_trace(br#"{"a":1,"traceId":null}"#.to_vec());
-        assert_eq!(String::from_utf8(out).unwrap(), r#"{"a":1,"traceId":"abc"}"#);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"a":1,"traceId":"abc"}"#
+        );
     }
 
     #[test]

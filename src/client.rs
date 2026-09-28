@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme, StreamOwned};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
+    StreamOwned,
+};
 
 use crate::error::{Error, Result};
 use crate::resp::{Decoder, RespValue, encode_command};
@@ -124,7 +127,11 @@ pub struct RedisClient {
 impl RedisClient {
     /// 建立连接并完成握手（HELLO / AUTH / SELECT）。
     pub fn connect(cfg: &ConnConfig) -> Result<Self> {
-        let timeout = Duration::from_millis(if cfg.timeout_ms > 0 { cfg.timeout_ms } else { 3000 });
+        let timeout = Duration::from_millis(if cfg.timeout_ms > 0 {
+            cfg.timeout_ms
+        } else {
+            3000
+        });
         let stream = connect_stream(cfg, timeout)?;
 
         let mut client = Self {
@@ -180,7 +187,11 @@ impl RedisClient {
     /// `block_seconds` 为命令自身的阻塞秒数（0 表示永久阻塞）。
     pub fn command_blocking(&mut self, args: &[&[u8]], block_seconds: i64) -> Result<RespValue> {
         let previous = self.reader.get_mut().read_timeout().ok().flatten();
-        let extra = if block_seconds <= 0 { 60 } else { block_seconds + 2 };
+        let extra = if block_seconds <= 0 {
+            60
+        } else {
+            block_seconds + 2
+        };
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_secs(extra as u64)))?;
@@ -297,7 +308,12 @@ impl RedisClient {
         let mut args: Vec<Vec<u8>> = vec![b"HELLO".to_vec(), protover.to_string().into_bytes()];
         if let Some(pwd) = &self.password {
             args.push(b"AUTH".to_vec());
-            args.push(self.user_name.clone().unwrap_or_else(|| "default".into()).into_bytes());
+            args.push(
+                self.user_name
+                    .clone()
+                    .unwrap_or_else(|| "default".into())
+                    .into_bytes(),
+            );
             args.push(pwd.clone().into_bytes());
         }
 
@@ -337,7 +353,9 @@ impl RedisClient {
 
     /// 与 C# `CheckLogin` / `CheckSelect` 对应的惰性握手。
     fn ensure_ready(&mut self, args: &[&[u8]]) -> Result<()> {
-        let cmd = args.first().map(|a| String::from_utf8_lossy(a).to_uppercase());
+        let cmd = args
+            .first()
+            .map(|a| String::from_utf8_lossy(a).to_uppercase());
         let cmd = cmd.as_deref().unwrap_or("");
 
         if !self.logged_in && !matches!(cmd, "AUTH" | "HELLO") {
@@ -361,7 +379,8 @@ impl RedisClient {
             }
         }
 
-        if self.selected_db != self.db && !matches!(cmd, "AUTH" | "SELECT" | "INFO" | "HELLO" | "QUIT")
+        if self.selected_db != self.db
+            && !matches!(cmd, "AUTH" | "SELECT" | "INFO" | "HELLO" | "QUIT")
         {
             if self.db > 0 {
                 self.select(self.db)?;
@@ -421,7 +440,10 @@ impl RedisClient {
             Ok(RespValue::Error(msg)) => Err(Error::Server(msg)),
             Ok(v) => Ok(v),
             Err(Error::Io(e))
-                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
             {
                 // 读超时可继续使用连接，交由调用方决定是否重试
                 Err(Error::Io(e))
@@ -462,7 +484,10 @@ fn connect_tcp(endpoint: &str, timeout: Duration) -> Result<TcpStream> {
     }
 
     Err(Error::Io(last_err.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, format!("无法连接 {endpoint}"))
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!("无法连接 {endpoint}"),
+        )
     })))
 }
 
@@ -497,7 +522,10 @@ fn tls_client_config(insecure: bool) -> Arc<ClientConfig> {
     Arc::new(config)
 }
 
-fn server_name_for_endpoint(endpoint: &str, override_name: Option<&str>) -> Result<ServerName<'static>> {
+fn server_name_for_endpoint(
+    endpoint: &str,
+    override_name: Option<&str>,
+) -> Result<ServerName<'static>> {
     let name = override_name.unwrap_or_else(|| endpoint_host(endpoint));
     if let Ok(ip) = name.parse::<IpAddr>() {
         return Ok(ServerName::IpAddress(ip.into()));
@@ -551,13 +579,17 @@ fn resolve(endpoint: &str) -> Result<Vec<std::net::SocketAddr>> {
         match candidate.to_socket_addrs() {
             Ok(addrs) => result.extend(addrs),
             Err(e) => {
-                return Err(Error::Config(format!("无法解析服务器地址 {candidate}：{e}")));
+                return Err(Error::Config(format!(
+                    "无法解析服务器地址 {candidate}：{e}"
+                )));
             }
         }
     }
 
     if result.is_empty() {
-        return Err(Error::Config(format!("服务器地址无可用解析结果：{endpoint}")));
+        return Err(Error::Config(format!(
+            "服务器地址无可用解析结果：{endpoint}"
+        )));
     }
     Ok(result)
 }
@@ -653,9 +685,8 @@ mod tests {
 
         let certified = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let cert_der = certified.cert.der().clone();
-        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            certified.key_pair.serialize_der(),
-        ));
+        let key_der =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
 
         let config = ServerConfig::builder()
             .with_no_client_auth()

@@ -37,7 +37,12 @@ where
 
     /// 元素个数（`ZCARD`）。
     pub fn len(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"ZCARD", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"ZCARD", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -262,7 +267,9 @@ where
                 b"MATCH",
                 pattern.as_bytes(),
                 b"COUNT",
-                (if count == 0 { 1000 } else { count }).to_string().as_bytes(),
+                (if count == 0 { 1000 } else { count })
+                    .to_string()
+                    .as_bytes(),
             ])?;
 
             let mut items = rs
@@ -300,7 +307,12 @@ where
         args.push(b"ZADD".to_vec());
         args.push(self.key.as_bytes().to_vec());
         let opt = options.trim();
-        if !opt.is_empty() && matches!(opt.to_ascii_uppercase().as_str(), "XX" | "NX" | "CH" | "INCR") {
+        if !opt.is_empty()
+            && matches!(
+                opt.to_ascii_uppercase().as_str(),
+                "XX" | "NX" | "CH" | "INCR"
+            )
+        {
             args.push(opt.as_bytes().to_vec());
         }
         for (score, m) in items {

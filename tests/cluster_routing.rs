@@ -72,7 +72,10 @@ fn cluster_routes_reads_to_replica_when_enabled() {
     let key = key_in_slot(0..=5460);
     set_raw(&replica, &key, "from-replica", 0);
 
-    assert_eq!(full.get::<String>(&key).unwrap().as_deref(), Some("from-replica"));
+    assert_eq!(
+        full.get::<String>(&key).unwrap().as_deref(),
+        Some("from-replica")
+    );
     assert!(!exists(&master, &key));
 }
 
@@ -152,7 +155,10 @@ fn cluster_ask_redirect_sends_asking_without_persisting_mapping() {
     redirect_once(&server_a, &key, &format!("ASK {slot} {}", server_b.addr));
     require_asking(&server_b, &key);
 
-    assert_eq!(full.get::<String>(&key).unwrap().as_deref(), Some("ask-target"));
+    assert_eq!(
+        full.get::<String>(&key).unwrap().as_deref(),
+        Some("ask-target")
+    );
     assert_eq!(full.get::<String>(&key).unwrap().as_deref(), Some("source"));
 }
 
@@ -201,8 +207,7 @@ fn cluster_multi_key_commands_group_by_node_and_preserve_order() {
     let key_a = key_in_slot(0..=5460);
     let key_b = key_in_slot(5461..=16383);
 
-    full
-        .set_all(&[(key_a.as_str(), "v1"), (key_b.as_str(), "v2")], 0)
+    full.set_all(&[(key_a.as_str(), "v1"), (key_b.as_str(), "v2")], 0)
         .unwrap();
     assert_eq!(raw_get(&server_a, &key_a).as_deref(), Some(&b"v1"[..]));
     assert_eq!(raw_get(&server_b, &key_b).as_deref(), Some(&b"v2"[..]));
@@ -214,18 +219,33 @@ fn cluster_multi_key_commands_group_by_node_and_preserve_order() {
     assert_eq!(values[0].as_deref(), Some(&b"v2"[..]));
     assert_eq!(values[1].as_deref(), Some(&b"v1"[..]));
 
-    let dic = full.get_all::<String>(&[key_a.as_str(), key_b.as_str()]).unwrap();
+    let dic = full
+        .get_all::<String>(&[key_a.as_str(), key_b.as_str()])
+        .unwrap();
     assert_eq!(dic.get(&key_a).map(|v| v.as_str()), Some("v1"));
     assert_eq!(dic.get(&key_b).map(|v| v.as_str()), Some("v2"));
 
-    assert_eq!(full.redis().touch(&[key_a.as_str(), key_b.as_str()]).unwrap(), 2);
-    assert_eq!(full.redis().unlink(&[key_a.as_str(), key_b.as_str()]).unwrap(), 2);
+    assert_eq!(
+        full.redis()
+            .touch(&[key_a.as_str(), key_b.as_str()])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        full.redis()
+            .unlink(&[key_a.as_str(), key_b.as_str()])
+            .unwrap(),
+        2
+    );
     assert!(!exists(&server_a, &key_a));
     assert!(!exists(&server_b, &key_b));
 
     full.set(&key_a, "v1", 0).unwrap();
     full.set(&key_b, "v2", 0).unwrap();
-    assert_eq!(full.remove_many(&[key_a.as_str(), key_b.as_str()]).unwrap(), 2);
+    assert_eq!(
+        full.remove_many(&[key_a.as_str(), key_b.as_str()]).unwrap(),
+        2
+    );
     assert!(!exists(&server_a, &key_a));
     assert!(!exists(&server_b, &key_b));
 }
@@ -306,7 +326,8 @@ fn auto_detect_cluster_loads_topology_from_info_and_cluster_nodes() {
         ]),
     );
 
-    let full = FullRedis::from_config(&format!("server={};db=0;autodetect=true", seed.addr)).unwrap();
+    let full =
+        FullRedis::from_config(&format!("server={};db=0;autodetect=true", seed.addr)).unwrap();
     let key = key_in_slot(5461..=16383);
     assert!(full.set(&key, "autodetect", 0).unwrap());
 
@@ -337,7 +358,10 @@ fn topology_refresh_seconds_reload_cluster_nodes_mapping() {
     let tag = key_in_slot(5461..=16383);
     let key1 = format!("{{{tag}}}:before");
     assert!(full.set(&key1, "before-refresh", 0).unwrap());
-    assert_eq!(raw_get(&target_a, &key1).as_deref(), Some(&b"before-refresh"[..]));
+    assert_eq!(
+        raw_get(&target_a, &key1).as_deref(),
+        Some(&b"before-refresh"[..])
+    );
 
     set_cluster_nodes(
         &seed,
@@ -350,7 +374,10 @@ fn topology_refresh_seconds_reload_cluster_nodes_mapping() {
     let key2 = format!("{{{tag}}}:after");
     assert!(full.set(&key2, "after-refresh", 0).unwrap());
     assert_eq!(raw_get(&target_a, &key2), None);
-    assert_eq!(raw_get(&target_b, &key2).as_deref(), Some(&b"after-refresh"[..]));
+    assert_eq!(
+        raw_get(&target_b, &key2).as_deref(),
+        Some(&b"after-refresh"[..])
+    );
 }
 
 #[test]
@@ -385,7 +412,10 @@ fn replication_mode_auto_loads_topology_and_prefers_master_for_writes() {
     assert_eq!(raw_get(&replica, key), None);
 
     set_raw(&replica, key, "replica-read", 0);
-    assert_eq!(full.get::<String>(key).unwrap().as_deref(), Some("replica-read"));
+    assert_eq!(
+        full.get::<String>(key).unwrap().as_deref(),
+        Some("replica-read")
+    );
 }
 
 #[test]
@@ -427,7 +457,10 @@ fn sentinel_mode_discovers_master_and_delegates_to_replication_topology() {
     assert_eq!(raw_get(&master, key).as_deref(), Some(&b"via-sentinel"[..]));
 
     set_raw(&replica, key, "replica-value", 0);
-    assert_eq!(full.get::<String>(key).unwrap().as_deref(), Some("replica-value"));
+    assert_eq!(
+        full.get::<String>(key).unwrap().as_deref(),
+        Some("replica-value")
+    );
 }
 
 #[test]
@@ -499,10 +532,16 @@ fn auto_detect_sentinel_loads_topology_from_info() {
 
     let key = "autodetect:sentinel";
     assert!(full.set(key, "sentinel-master", 0).unwrap());
-    assert_eq!(raw_get(&master, key).as_deref(), Some(&b"sentinel-master"[..]));
+    assert_eq!(
+        raw_get(&master, key).as_deref(),
+        Some(&b"sentinel-master"[..])
+    );
 
     set_raw(&replica, key, "sentinel-replica", 0);
-    assert_eq!(full.get::<String>(key).unwrap().as_deref(), Some("sentinel-replica"));
+    assert_eq!(
+        full.get::<String>(key).unwrap().as_deref(),
+        Some("sentinel-replica")
+    );
 }
 
 #[test]
@@ -537,5 +576,8 @@ fn sentinel_mode_can_delegate_to_cluster_topology() {
     assert!(full.set(&key, "sentinel-cluster", 0).unwrap());
 
     assert_eq!(raw_get(&cluster_seed, &key), None);
-    assert_eq!(raw_get(&cluster_target, &key).as_deref(), Some(&b"sentinel-cluster"[..]));
+    assert_eq!(
+        raw_get(&cluster_target, &key).as_deref(),
+        Some(&b"sentinel-cluster"[..])
+    );
 }

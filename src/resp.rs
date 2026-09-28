@@ -69,7 +69,8 @@ impl RespValue {
 
     /// 转为 UTF-8 字符串（非法字节使用替换字符）。
     pub fn as_string(&self) -> Option<String> {
-        self.as_bytes().map(|b| String::from_utf8_lossy(&b).into_owned())
+        self.as_bytes()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
     }
 
     /// 转为整数。兼容 C# 端对字符串结果的 `ToInt()` 转换。
@@ -204,7 +205,9 @@ impl<R: BufRead> Decoder<R> {
         };
 
         match kind {
-            b'+' => Ok(RespValue::Simple(String::from_utf8_lossy(rest).into_owned())),
+            b'+' => Ok(RespValue::Simple(
+                String::from_utf8_lossy(rest).into_owned(),
+            )),
             b'-' => Ok(RespValue::Error(String::from_utf8_lossy(rest).into_owned())),
             b':' => Ok(RespValue::Integer(parse_i64(rest)?)),
             b'$' => self.read_bulk(rest),
@@ -224,7 +227,9 @@ impl<R: BufRead> Decoder<R> {
                 ))),
             },
             b'_' => Ok(RespValue::Null),
-            b'(' => Ok(RespValue::BigNumber(String::from_utf8_lossy(rest).into_owned())),
+            b'(' => Ok(RespValue::BigNumber(
+                String::from_utf8_lossy(rest).into_owned(),
+            )),
             other => Err(Error::Protocol(format!(
                 "未知的 RESP 类型标记：{}",
                 other as char
@@ -365,7 +370,10 @@ mod tests {
     fn decode_resp2_scalars() {
         assert_eq!(decode(b"+OK\r\n"), RespValue::Simple("OK".into()));
         assert_eq!(decode(b":42\r\n"), RespValue::Integer(42));
-        assert_eq!(decode(b"$5\r\nvalue\r\n"), RespValue::Bulk(b"value".to_vec()));
+        assert_eq!(
+            decode(b"$5\r\nvalue\r\n"),
+            RespValue::Bulk(b"value".to_vec())
+        );
         assert_eq!(decode(b"$-1\r\n"), RespValue::Null);
         assert_eq!(decode(b"*-1\r\n"), RespValue::Null);
         assert_eq!(decode(b"$0\r\n\r\n"), RespValue::Bulk(Vec::new()));
@@ -405,8 +413,10 @@ mod tests {
             decode(b"=9\r\ntxt:hello\r\n"),
             RespValue::Verbatim("hello".into())
         );
-        assert_eq!(decode(b"(3492890328409238509324850943850943825024385\r\n"),
-            RespValue::BigNumber("3492890328409238509324850943850943825024385".into()));
+        assert_eq!(
+            decode(b"(3492890328409238509324850943850943825024385\r\n"),
+            RespValue::BigNumber("3492890328409238509324850943850943825024385".into())
+        );
     }
 
     #[test]
@@ -415,7 +425,10 @@ mod tests {
         assert_eq!(
             v,
             RespValue::Map(vec![
-                (RespValue::Bulk(b"k".to_vec()), RespValue::Bulk(b"v".to_vec())),
+                (
+                    RespValue::Bulk(b"k".to_vec()),
+                    RespValue::Bulk(b"v".to_vec())
+                ),
                 (RespValue::Bulk(b"k2".to_vec()), RespValue::Integer(5)),
             ])
         );
@@ -444,7 +457,10 @@ mod tests {
     fn attribute_frames_are_skipped_by_read_reply() {
         let bytes = b"|1\r\n$3\r\nwhy\r\n$3\r\nfoo\r\n+OK\r\n";
         let mut decoder = Decoder::new(Cursor::new(bytes.to_vec()));
-        assert_eq!(decoder.read_reply().unwrap(), RespValue::Simple("OK".into()));
+        assert_eq!(
+            decoder.read_reply().unwrap(),
+            RespValue::Simple("OK".into())
+        );
     }
 
     #[test]

@@ -16,11 +16,7 @@ pub fn extract_hash_tag(key: &str) -> &str {
     let Some(end_rel) = rest.find('}') else {
         return key;
     };
-    if end_rel == 0 {
-        key
-    } else {
-        &rest[..end_rel]
-    }
+    if end_rel == 0 { key } else { &rest[..end_rel] }
 }
 
 /// 计算 Redis Cluster 哈希槽位（`CRC16(tag) % 16384`）。

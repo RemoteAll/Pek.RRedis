@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::cluster::{ClusterNode, RedisClusterTopology, RedisReplicationTopology, Topology};
 use crate::client::{ConnConfig, RedisClient};
+use crate::cluster::{ClusterNode, RedisClusterTopology, RedisReplicationTopology, Topology};
 use crate::encoder::{FromRedisPayload, ToRedisPayload};
 use crate::error::{Error, Result};
 use crate::options::{RedisOptions, ServerMode};
@@ -281,7 +281,7 @@ impl Redis {
             self.ensure_topology()?;
         }
         if let Some(route) = route
-            && let Some(topology) = self.topology() 
+            && let Some(topology) = self.topology()
             && let Some(node) = topology.select_node(route.key, route.write)
         {
             let mut current = node;
@@ -381,7 +381,14 @@ impl Redis {
     }
 
     fn redis_for_endpoint(&self, endpoint: &str) -> Result<Redis> {
-        if let Some(redis) = self.inner.endpoint_clients.lock().unwrap().get(endpoint).cloned() {
+        if let Some(redis) = self
+            .inner
+            .endpoint_clients
+            .lock()
+            .unwrap()
+            .get(endpoint)
+            .cloned()
+        {
             return Ok(redis);
         }
 
@@ -511,12 +518,12 @@ impl Redis {
     fn load_topology(&self, mode: ServerMode) -> Result<Arc<dyn Topology>> {
         match mode {
             ServerMode::Cluster => self.load_cluster_topology(None),
-            ServerMode::Replication => self.load_replication_topology(
-                self.inner.options.endpoints(),
-                ServerMode::Replication,
-            ),
+            ServerMode::Replication => self
+                .load_replication_topology(self.inner.options.endpoints(), ServerMode::Replication),
             ServerMode::Sentinel => self.load_sentinel_topology(),
-            _ => Err(Error::Operation(format!("不支持的拓扑模式初始化：{mode:?}"))),
+            _ => Err(Error::Operation(format!(
+                "不支持的拓扑模式初始化：{mode:?}"
+            ))),
         }
     }
 
@@ -657,7 +664,9 @@ impl Redis {
             .collect();
 
         if seeds.is_empty() {
-            return Err(last_error.unwrap_or_else(|| Error::Operation("哨兵未返回可用主节点".into())));
+            return Err(
+                last_error.unwrap_or_else(|| Error::Operation("哨兵未返回可用主节点".into()))
+            );
         }
 
         let info = self.fetch_info(Some(&seeds[0]), None)?;
@@ -667,7 +676,11 @@ impl Redis {
         }
     }
 
-    fn fetch_info(&self, endpoint: Option<&str>, section: Option<&str>) -> Result<HashMap<String, String>> {
+    fn fetch_info(
+        &self,
+        endpoint: Option<&str>,
+        section: Option<&str>,
+    ) -> Result<HashMap<String, String>> {
         Ok(parse_info(&self.fetch_info_text(endpoint, section)?))
     }
 
@@ -676,10 +689,15 @@ impl Redis {
             (Some(endpoint), Some(section)) => {
                 self.execute_on_endpoint(endpoint, &[b"INFO", section.as_bytes()], None, false)?
             }
-            (Some(endpoint), None) => self.execute_on_endpoint(endpoint, &[b"INFO"], None, false)?,
-            (None, Some(section)) => {
-                self.execute_with_pool(&self.inner.pool, &[b"INFO", section.as_bytes()], None, false)?
+            (Some(endpoint), None) => {
+                self.execute_on_endpoint(endpoint, &[b"INFO"], None, false)?
             }
+            (None, Some(section)) => self.execute_with_pool(
+                &self.inner.pool,
+                &[b"INFO", section.as_bytes()],
+                None,
+                false,
+            )?,
             (None, None) => self.execute_with_pool(&self.inner.pool, &[b"INFO"], None, false)?,
         };
 
@@ -803,7 +821,11 @@ impl Redis {
     /// 设置过期时间（秒）（`EXPIRE`）。
     pub fn set_expire(&self, key: &str, seconds: i64) -> Result<bool> {
         Ok(self
-            .execute_on_key(key, true, &[b"EXPIRE", key.as_bytes(), seconds.to_string().as_bytes()])?
+            .execute_on_key(
+                key,
+                true,
+                &[b"EXPIRE", key.as_bytes(), seconds.to_string().as_bytes()],
+            )?
             .as_i64()
             .unwrap_or(0)
             == 1)
@@ -815,7 +837,11 @@ impl Redis {
             .execute_on_key(
                 key,
                 true,
-                &[b"PEXPIRE", key.as_bytes(), milliseconds.to_string().as_bytes()],
+                &[
+                    b"PEXPIRE",
+                    key.as_bytes(),
+                    milliseconds.to_string().as_bytes(),
+                ],
             )?
             .as_i64()
             .unwrap_or(0)
@@ -926,7 +952,13 @@ impl Redis {
     }
 
     /// 拷贝键（`COPY`，Redis 6.2+）。
-    pub fn copy(&self, source: &str, destination: &str, db: Option<i32>, replace: bool) -> Result<bool> {
+    pub fn copy(
+        &self,
+        source: &str,
+        destination: &str,
+        db: Option<i32>,
+        replace: bool,
+    ) -> Result<bool> {
         let mut args: Vec<Vec<u8>> = vec![
             b"COPY".to_vec(),
             source.as_bytes().to_vec(),
@@ -940,7 +972,11 @@ impl Redis {
             args.push(b"REPLACE".to_vec());
         }
         let refs: Vec<&[u8]> = args.iter().map(|a| a.as_slice()).collect();
-        Ok(self.execute_on_key(source, true, &refs)?.as_i64().unwrap_or(0) == 1)
+        Ok(self
+            .execute_on_key(source, true, &refs)?
+            .as_i64()
+            .unwrap_or(0)
+            == 1)
     }
 
     /// 随机键（`RANDOMKEY`）。
@@ -956,13 +992,17 @@ impl Redis {
     /// 键内存占用（`MEMORY USAGE`），不存在返回 `None`。
     pub fn memory_usage(&self, key: &str, samples: i32) -> Result<Option<i64>> {
         let rs = if samples > 0 {
-            self.execute_on_key(key, false, &[
-                b"MEMORY",
-                b"USAGE",
-                key.as_bytes(),
-                b"SAMPLES",
-                samples.to_string().as_bytes(),
-            ])?
+            self.execute_on_key(
+                key,
+                false,
+                &[
+                    b"MEMORY",
+                    b"USAGE",
+                    key.as_bytes(),
+                    b"SAMPLES",
+                    samples.to_string().as_bytes(),
+                ],
+            )?
         } else {
             self.execute_on_key(key, false, &[b"MEMORY", b"USAGE", key.as_bytes()])?
         };
@@ -1069,12 +1109,16 @@ impl Redis {
         let rs = if expire <= 0 {
             self.execute_on_key(key, true, &[b"SET", key.as_bytes(), &payload])?
         } else {
-            self.execute_on_key(key, true, &[
-                b"SETEX",
-                key.as_bytes(),
-                expire.to_string().as_bytes(),
-                &payload,
-            ])?
+            self.execute_on_key(
+                key,
+                true,
+                &[
+                    b"SETEX",
+                    key.as_bytes(),
+                    expire.to_string().as_bytes(),
+                    &payload,
+                ],
+            )?
         };
 
         Ok(rs.as_string().as_deref() == Some("OK"))
@@ -1099,7 +1143,9 @@ impl Redis {
 
     /// 获取字符串值。
     pub fn get_string(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.get_raw(key)?.map(|b| String::from_utf8_lossy(&b).into_owned()))
+        Ok(self
+            .get_raw(key)?
+            .map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 
     /// 仅在键不存在时设置（`SET ... NX`）。
@@ -1118,14 +1164,18 @@ impl Redis {
         let key = key.as_ref();
 
         let rs = if expire > 0 {
-            self.execute_on_key(key, true, &[
-                b"SET",
-                key.as_bytes(),
-                &payload,
-                b"EX",
-                expire.to_string().as_bytes(),
-                b"NX",
-            ])?
+            self.execute_on_key(
+                key,
+                true,
+                &[
+                    b"SET",
+                    key.as_bytes(),
+                    &payload,
+                    b"EX",
+                    expire.to_string().as_bytes(),
+                    b"NX",
+                ],
+            )?
         } else {
             self.execute_on_key(key, true, &[b"SET", key.as_bytes(), &payload, b"NX"])?
         };
@@ -1155,11 +1205,7 @@ impl Redis {
         expire_seconds: i64,
     ) -> Result<Option<T>> {
         let payload = value.to_redis_payload()?.unwrap_or_default();
-        let mut args: Vec<Vec<u8>> = vec![
-            b"SET".to_vec(),
-            key.as_bytes().to_vec(),
-            payload,
-        ];
+        let mut args: Vec<Vec<u8>> = vec![b"SET".to_vec(), key.as_bytes().to_vec(), payload];
         if expire_seconds > 0 {
             args.push(b"EX".to_vec());
             args.push(expire_seconds.to_string().into_bytes());
@@ -1193,12 +1239,16 @@ impl Redis {
     /// 截取子串（`GETRANGE`，含头含尾，-1 表示末尾）。
     pub fn get_range(&self, key: &str, start: i64, end: i64) -> Result<String> {
         Ok(self
-            .execute_on_key(key, false, &[
-                b"GETRANGE",
-                key.as_bytes(),
-                start.to_string().as_bytes(),
-                end.to_string().as_bytes(),
-            ])?
+            .execute_on_key(
+                key,
+                false,
+                &[
+                    b"GETRANGE",
+                    key.as_bytes(),
+                    start.to_string().as_bytes(),
+                    end.to_string().as_bytes(),
+                ],
+            )?
             .as_string()
             .unwrap_or_default())
     }
@@ -1206,12 +1256,16 @@ impl Redis {
     /// 覆盖区间（`SETRANGE`），返回新长度。
     pub fn set_range(&self, key: &str, offset: i64, value: &str) -> Result<i64> {
         Ok(self
-            .execute_on_key(key, true, &[
-                b"SETRANGE",
-                key.as_bytes(),
-                offset.to_string().as_bytes(),
-                value.as_bytes(),
-            ])?
+            .execute_on_key(
+                key,
+                true,
+                &[
+                    b"SETRANGE",
+                    key.as_bytes(),
+                    offset.to_string().as_bytes(),
+                    value.as_bytes(),
+                ],
+            )?
             .as_i64()
             .unwrap_or(0))
     }
@@ -1221,18 +1275,26 @@ impl Redis {
         let rs = if delta == 1 {
             self.execute_on_key(key, true, &[b"INCR", key.as_bytes()])?
         } else {
-            self.execute_on_key(key, true, &[b"INCRBY", key.as_bytes(), delta.to_string().as_bytes()])?
+            self.execute_on_key(
+                key,
+                true,
+                &[b"INCRBY", key.as_bytes(), delta.to_string().as_bytes()],
+            )?
         };
         Ok(rs.as_i64().unwrap_or(0))
     }
 
     /// 浮点自增（`INCRBYFLOAT`）。
     pub fn increment_float(&self, key: &str, delta: f64) -> Result<f64> {
-        let rs = self.execute_on_key(key, true, &[
-            b"INCRBYFLOAT",
-            key.as_bytes(),
-            crate::encoder::format_f64(delta).as_bytes(),
-        ])?;
+        let rs = self.execute_on_key(
+            key,
+            true,
+            &[
+                b"INCRBYFLOAT",
+                key.as_bytes(),
+                crate::encoder::format_f64(delta).as_bytes(),
+            ],
+        )?;
         rs.as_f64()
             .ok_or_else(|| Error::Type("INCRBYFLOAT 返回不是数字".into()))
     }
@@ -1242,7 +1304,11 @@ impl Redis {
         let rs = if delta == 1 {
             self.execute_on_key(key, true, &[b"DECR", key.as_bytes()])?
         } else {
-            self.execute_on_key(key, true, &[b"DECRBY", key.as_bytes(), delta.to_string().as_bytes()])?
+            self.execute_on_key(
+                key,
+                true,
+                &[b"DECRBY", key.as_bytes(), delta.to_string().as_bytes()],
+            )?
         };
         Ok(rs.as_i64().unwrap_or(0))
     }
@@ -1250,12 +1316,16 @@ impl Redis {
     /// 位设置（`SETBIT`）。
     pub fn set_bit(&self, key: &str, offset: u64, value: u8) -> Result<i64> {
         Ok(self
-            .execute_on_key(key, true, &[
-                b"SETBIT",
-                key.as_bytes(),
-                offset.to_string().as_bytes(),
-                value.to_string().as_bytes(),
-            ])?
+            .execute_on_key(
+                key,
+                true,
+                &[
+                    b"SETBIT",
+                    key.as_bytes(),
+                    offset.to_string().as_bytes(),
+                    value.to_string().as_bytes(),
+                ],
+            )?
             .as_i64()
             .unwrap_or(0))
     }
@@ -1263,7 +1333,11 @@ impl Redis {
     /// 位读取（`GETBIT`）。
     pub fn get_bit(&self, key: &str, offset: u64) -> Result<i64> {
         Ok(self
-            .execute_on_key(key, false, &[b"GETBIT", key.as_bytes(), offset.to_string().as_bytes()])?
+            .execute_on_key(
+                key,
+                false,
+                &[b"GETBIT", key.as_bytes(), offset.to_string().as_bytes()],
+            )?
             .as_i64()
             .unwrap_or(0))
     }
@@ -1271,12 +1345,16 @@ impl Redis {
     /// 统计置位数量（`BITCOUNT`）。
     pub fn bit_count(&self, key: &str, start: i64, end: i64) -> Result<i64> {
         Ok(self
-            .execute_on_key(key, false, &[
-                b"BITCOUNT",
-                key.as_bytes(),
-                start.to_string().as_bytes(),
-                end.to_string().as_bytes(),
-            ])?
+            .execute_on_key(
+                key,
+                false,
+                &[
+                    b"BITCOUNT",
+                    key.as_bytes(),
+                    start.to_string().as_bytes(),
+                    end.to_string().as_bytes(),
+                ],
+            )?
             .as_i64()
             .unwrap_or(0))
     }
@@ -1284,13 +1362,17 @@ impl Redis {
     /// 查找首个置位/清零位（`BITPOS`）。
     pub fn bit_pos(&self, key: &str, bit: i32, start: i64, end: i64) -> Result<i64> {
         Ok(self
-            .execute_on_key(key, false, &[
-                b"BITPOS",
-                key.as_bytes(),
-                bit.to_string().as_bytes(),
-                start.to_string().as_bytes(),
-                end.to_string().as_bytes(),
-            ])?
+            .execute_on_key(
+                key,
+                false,
+                &[
+                    b"BITPOS",
+                    key.as_bytes(),
+                    bit.to_string().as_bytes(),
+                    start.to_string().as_bytes(),
+                    end.to_string().as_bytes(),
+                ],
+            )?
             .as_i64()
             .unwrap_or(-1))
     }
@@ -1333,7 +1415,11 @@ impl Redis {
                 }
 
                 for ((index, _), value) in entries.iter().zip(items) {
-                    results[*index] = if value.is_null() { None } else { value.as_bytes() };
+                    results[*index] = if value.is_null() {
+                        None
+                    } else {
+                        value.as_bytes()
+                    };
                 }
             }
             return Ok(results);
@@ -1362,9 +1448,10 @@ impl Redis {
         let mut dic = HashMap::with_capacity(keys.len());
         for (key, raw) in keys.iter().zip(values) {
             if let Some(bytes) = raw
-                && let Ok(v) = T::from_redis_payload(&bytes) {
-                    dic.insert((*key).to_string(), v);
-                }
+                && let Ok(v) = T::from_redis_payload(&bytes)
+            {
+                dic.insert((*key).to_string(), v);
+            }
         }
         Ok(dic)
     }
@@ -1447,7 +1534,9 @@ impl Redis {
     ///
     /// 与 C# `Redis.Version` 一致：部分兼容实现（Garnet/Pika）版本号可能非标准，解析失败视为 0。
     pub fn version_parts(&self) -> Result<(u32, u32, u32)> {
-        Ok(parse_version_parts(self.version()?.as_deref().unwrap_or("")))
+        Ok(parse_version_parts(
+            self.version()?.as_deref().unwrap_or(""),
+        ))
     }
 
     /// 版本门禁：低于要求版本时返回 [`Error::Unsupported`]（对应 C# `RequireVersion`）。
@@ -1591,7 +1680,8 @@ pub struct Pipeline<'a> {
 impl<'a> Pipeline<'a> {
     /// 追加一条原始命令。
     pub fn cmd(&mut self, args: &[&[u8]]) -> &mut Self {
-        self.commands.push(args.iter().map(|a| a.to_vec()).collect());
+        self.commands
+            .push(args.iter().map(|a| a.to_vec()).collect());
         self
     }
 
@@ -1645,7 +1735,9 @@ impl<'a> Pipeline<'a> {
     /// 执行并检查每条应答是否为 `OK`。
     pub fn execute_ok(&mut self) -> Result<()> {
         for value in self.execute()? {
-            if let RespValue::Error(msg) = value { return Err(Error::Server(msg)) }
+            if let RespValue::Error(msg) = value {
+                return Err(Error::Server(msg));
+            }
         }
         Ok(())
     }
@@ -1775,7 +1867,10 @@ fn parse_replication_discovery(info: &HashMap<String, String>) -> ReplicationDis
         result.master_endpoint = Some(format!("{host}:{port}"));
     }
 
-    if let Some(count) = info.get("connected_slaves").and_then(|v| v.parse::<usize>().ok()) {
+    if let Some(count) = info
+        .get("connected_slaves")
+        .and_then(|v| v.parse::<usize>().ok())
+    {
         for index in 0..count {
             if let Some(text) = info.get(&format!("slave{index}"))
                 && let Some(slave) = parse_slave_info(text)
@@ -1785,7 +1880,10 @@ fn parse_replication_discovery(info: &HashMap<String, String>) -> ReplicationDis
         }
     }
 
-    if let Some(count) = info.get("sentinel_masters").and_then(|v| v.parse::<usize>().ok()) {
+    if let Some(count) = info
+        .get("sentinel_masters")
+        .and_then(|v| v.parse::<usize>().ok())
+    {
         for index in 0..count {
             if let Some(text) = info.get(&format!("master{index}"))
                 && let Some(master) = parse_master_info(text)
@@ -1899,13 +1997,23 @@ mod tests {
     #[test]
     fn detect_topology_mode_from_info_distinguishes_cluster_replication_and_sentinel() {
         let cluster = parse_info("redis_mode:cluster\r\n");
-        assert_eq!(detect_topology_mode_from_info(&cluster, 1), Some(ServerMode::Cluster));
+        assert_eq!(
+            detect_topology_mode_from_info(&cluster, 1),
+            Some(ServerMode::Cluster)
+        );
 
         let repl = parse_info("redis_mode:standalone\r\nrole:master\r\nconnected_slaves:1\r\n");
-        assert_eq!(detect_topology_mode_from_info(&repl, 2), Some(ServerMode::Replication));
+        assert_eq!(
+            detect_topology_mode_from_info(&repl, 2),
+            Some(ServerMode::Replication)
+        );
 
-        let sentinel = parse_info("sentinel_masters:1\r\nmaster0:name=m,status=ok,address=127.0.0.1:6379\r\n");
-        assert_eq!(detect_topology_mode_from_info(&sentinel, 1), Some(ServerMode::Sentinel));
+        let sentinel =
+            parse_info("sentinel_masters:1\r\nmaster0:name=m,status=ok,address=127.0.0.1:6379\r\n");
+        assert_eq!(
+            detect_topology_mode_from_info(&sentinel, 1),
+            Some(ServerMode::Sentinel)
+        );
     }
 
     #[test]

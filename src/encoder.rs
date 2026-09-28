@@ -110,7 +110,11 @@ impl ToRedisPayload for Vec<u8> {
 impl ToRedisPayload for bool {
     fn to_redis_payload(&self) -> Result<Option<Vec<u8>>> {
         // 与 C# Boolean.ToString() 一致
-        Ok(Some(if *self { b"True".to_vec() } else { b"False".to_vec() }))
+        Ok(Some(if *self {
+            b"True".to_vec()
+        } else {
+            b"False".to_vec()
+        }))
     }
 }
 
@@ -344,7 +348,11 @@ pub fn format_f64(v: f64) -> String {
         return "NaN".into();
     }
     if v.is_infinite() {
-        return if v > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if v > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     let s = format!("{v}");
     if s.contains(['e', 'E']) {
@@ -402,9 +410,10 @@ pub fn parse_datetime(s: &str) -> Result<NaiveDateTime> {
             return Ok(dt);
         }
         if fmt == "%Y-%m-%d"
-            && let Ok(d) = chrono::NaiveDate::parse_from_str(s, fmt) {
-                return Ok(d.and_hms_opt(0, 0, 0).unwrap());
-            }
+            && let Ok(d) = chrono::NaiveDate::parse_from_str(s, fmt)
+        {
+            return Ok(d.and_hms_opt(0, 0, 0).unwrap());
+        }
     }
 
     // 带时区偏移的 ISO 8601：换算成本机时区的朴素时间，便于与 DateTime.Now 语义对齐
@@ -451,11 +460,13 @@ mod tests {
 
     #[test]
     fn datetime_payload_matches_csharp_fff_format() {
-        let dt = NaiveDateTime::parse_from_str("2026-09-26 10:00:00.123456", "%Y-%m-%d %H:%M:%S%.f")
-            .unwrap();
+        let dt =
+            NaiveDateTime::parse_from_str("2026-09-26 10:00:00.123456", "%Y-%m-%d %H:%M:%S%.f")
+                .unwrap();
         assert_eq!(payload_of(dt), "2026-09-26 10:00:00.123");
 
-        let dt2 = NaiveDateTime::parse_from_str("2026-09-26 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let dt2 =
+            NaiveDateTime::parse_from_str("2026-09-26 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         assert_eq!(payload_of(dt2), "2026-09-26 10:00:00.000");
     }
 
@@ -486,8 +497,14 @@ mod tests {
         assert!(<bool as FromRedisPayload>::from_redis_payload(b"OK").unwrap());
         assert!(<bool as FromRedisPayload>::from_redis_payload(b"1").unwrap());
         assert!(!<bool as FromRedisPayload>::from_redis_payload(b"0").unwrap());
-        assert_eq!(<i32 as FromRedisPayload>::from_redis_payload(b"42").unwrap(), 42);
-        assert_eq!(<f64 as FromRedisPayload>::from_redis_payload(b"1.5").unwrap(), 1.5);
+        assert_eq!(
+            <i32 as FromRedisPayload>::from_redis_payload(b"42").unwrap(),
+            42
+        );
+        assert_eq!(
+            <f64 as FromRedisPayload>::from_redis_payload(b"1.5").unwrap(),
+            1.5
+        );
         assert_eq!(
             <String as FromRedisPayload>::from_redis_payload("中文字符".as_bytes()).unwrap(),
             "中文字符"

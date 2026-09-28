@@ -59,7 +59,12 @@ where
 
     /// 待消费消息数（`ZCARD`，含未到期的）。
     pub fn count(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"ZCARD", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"ZCARD", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -162,9 +167,10 @@ where
                 0,
             );
             if removed > 0
-                && let Some(v) = decode::<V>(crate::resp::RespValue::Bulk(bytes)) {
-                    result.push(v);
-                }
+                && let Some(v) = decode::<V>(crate::resp::RespValue::Bulk(bytes))
+            {
+                result.push(v);
+            }
         }
 
         Ok(result)
@@ -173,7 +179,11 @@ where
     /// 获取一条到期消息。`timeout_seconds == 0` 时最多等待 60 秒（与 C# 相同），
     /// 负数则只尝试一次不等待。
     pub fn take_one(&self, timeout_seconds: i64) -> Result<Option<V>> {
-        let mut timeout = if timeout_seconds == 0 { 60 } else { timeout_seconds };
+        let mut timeout = if timeout_seconds == 0 {
+            60
+        } else {
+            timeout_seconds
+        };
 
         loop {
             let mut items = self.take_due(1)?;
@@ -190,26 +200,35 @@ where
         }
     }
 
+    /// 立即把当前所有到期消息转移到目标队列，返回转移条数（不睡眠，可供定时器回调复用）。
+    ///
+    /// 与 [`RedisDelayQueue::transfer_loop`] 的“每批 10 条、连续取直到取空”语义一致。
+    pub fn transfer_due(&self, target: &RedisQueue<V>) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let messages = self.take_due(10)?;
+            if messages.is_empty() {
+                return Ok(total);
+            }
+            total += messages.len();
+            target.add_many(&messages)?;
+        }
+    }
+
     /// 将到期消息转移到目标队列（对应 C# `TransferAsync`）。
     ///
     /// 阻塞循环直到 `cancel` 置位；建议在独立线程中调用（每个队列进程内开一个即可）。
-    pub fn transfer_loop(
-        &self,
-        target: &RedisQueue<V>,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<()> {
+    /// 若由 DH.RustBase 定时器驱动，请改用 [`RedisDelayQueue::transfer_due`]。
+    pub fn transfer_loop(&self, target: &RedisQueue<V>, cancel: Arc<AtomicBool>) -> Result<()> {
         while !cancel.load(Ordering::Relaxed) {
-            let messages = self.take_due(10)?;
-            if messages.is_empty() {
-                // 没有到期消息，歇一会
+            if self.transfer_due(target)? == 0 {
+                // 没有到期消息，歇一会（可被 cancel 打断）
                 for _ in 0..(self.transfer_interval_seconds * 10) {
                     if cancel.load(Ordering::Relaxed) {
                         return Ok(());
                     }
                     sleep(Duration::from_millis(100));
                 }
-            } else {
-                target.add_many(&messages)?;
             }
         }
         Ok(())

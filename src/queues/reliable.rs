@@ -7,6 +7,7 @@
 //! - 状态键 `key:Status:{ukey}`：JSON（PascalCase、ISO 时间），7 天过期；
 //! - 全局清理权键 `key:AllStatus`：`SET NX EX RetryInterval` 抢占，谁抢到谁执行 [`RedisReliableQueue::rollback_all_ack`]；
 //! - 死信判定：`LastActive + RetryInterval * 10 < now` 时回滚该消费者的确认队列；
+//! - 延迟消息：`add_delay` 自动拉起转移 worker（基于 DH.RustBase `dhrust::threading::Timer`），定时把到期消息转移回主队列；
 //! - 高级用法：`Publish(key→消息体, expire)` + [`RedisReliableQueue::consume`] 实现「至少一次 + 幂等」消费。
 
 use std::marker::PhantomData;
@@ -16,6 +17,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
+use dhrust::threading::Timer;
 
 use crate::encoder::{FromRedisPayload, ToRedisPayload};
 use crate::error::{Error, Result};
@@ -26,9 +28,9 @@ use crate::queues::queue::RedisQueue;
 use crate::queues::status::{RedisQueueStatus, new_consumer_key};
 use crate::util::{decode, int_or, payload};
 
+/// 延迟转移 worker（基于 DH.RustBase 定时器，对应 C# `InitDelay` 自动拉起的长任务）。
 struct DelayWorker {
-    cancel: std::sync::Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<()>,
+    timer: Timer,
 }
 
 /// 可靠队列。
@@ -50,6 +52,8 @@ pub struct RedisReliableQueue<V> {
     settings: QueueSettings,
     /// 消费者死信超时判定步长（秒）。默认 60，对应 C# `RetryInterval`
     pub retry_interval_seconds: i64,
+    /// 自动拉起的延迟转移 worker 的转移周期（秒）。默认 10，对应 C# `RedisDelayQueue.TransferInterval`
+    pub delay_transfer_interval_seconds: u64,
     _marker: PhantomData<fn() -> V>,
 }
 
@@ -78,6 +82,7 @@ where
             delay_worker: Mutex::new(None),
             settings: QueueSettings::default(),
             retry_interval_seconds: 60,
+            delay_transfer_interval_seconds: 10,
             _marker: PhantomData,
         }
     }
@@ -114,7 +119,12 @@ where
 
     /// 主队列消息数量（`LLEN`）。
     pub fn count(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"LLEN", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"LLEN", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -217,9 +227,11 @@ where
                 timeout_seconds,
             )?
         } else {
-            self.redis
-                .redis()
-                .execute(&[b"RPOPLPUSH", self.key.as_bytes(), self.ack_key.as_bytes()])?
+            self.redis.redis().execute(&[
+                b"RPOPLPUSH",
+                self.key.as_bytes(),
+                self.ack_key.as_bytes(),
+            ])?
         };
 
         if rs.is_null() {
@@ -265,12 +277,7 @@ where
         let mut removed = 0;
         let mut pipeline = self.redis.redis().pipeline();
         for key in keys {
-            pipeline.cmd(&[
-                b"LREM",
-                self.ack_key.as_bytes(),
-                b"1",
-                key.as_bytes(),
-            ]);
+            pipeline.cmd(&[b"LREM", self.ack_key.as_bytes(), b"1", key.as_bytes()]);
         }
         for value in pipeline.execute()? {
             removed += value.as_i64().unwrap_or(0);
@@ -375,9 +382,10 @@ where
                     Ok(message) => on_message(&message, &raw),
                     Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                 },
-                None => Err(Box::new(std::io::Error::other(format!(
-                    "JSON 解析失败: {raw}"
-                ))) as Box<dyn std::error::Error + Send + Sync>),
+                None => Err(
+                    Box::new(std::io::Error::other(format!("JSON 解析失败: {raw}")))
+                        as Box<dyn std::error::Error + Send + Sync>,
+                ),
             };
 
             match result {
@@ -462,9 +470,11 @@ where
                 timeout_seconds,
             )?
         } else {
-            self.redis
-                .redis()
-                .execute(&[b"RPOPLPUSH", self.key.as_bytes(), self.ack_key.as_bytes()])?
+            self.redis.redis().execute(&[
+                b"RPOPLPUSH",
+                self.key.as_bytes(),
+                self.ack_key.as_bytes(),
+            ])?
         };
 
         if rs.is_null() {
@@ -496,11 +506,11 @@ where
 
         // 抢夺全局清理权，减少全局扫描次数
         let json = self.status.lock().unwrap().to_json();
-        if self
-            .redis
-            .redis()
-            .add(&self.all_status_key, json.as_str(), self.retry_interval_seconds)?
-        {
+        if self.redis.redis().add(
+            &self.all_status_key,
+            json.as_str(),
+            self.retry_interval_seconds,
+        )? {
             self.rollback_all_ack()?;
         }
 
@@ -598,7 +608,8 @@ where
         RedisDelayQueue::new(self.redis.clone(), &format!("{}:Delay", self.key))
     }
 
-    /// 添加延迟消息。
+    /// 添加延迟消息。首次调用会自动拉起延迟转移 worker
+    /// （基于 DH.RustBase `dhrust::threading::Timer`，每 [`RedisReliableQueue::delay_transfer_interval_seconds`] 秒把到期消息转移回主队列）。
     pub fn add_delay(&self, value: &V, delay_seconds: i64) -> Result<i64>
     where
         V: 'static,
@@ -612,27 +623,22 @@ where
         V: 'static,
     {
         let mut worker = self.delay_worker.lock().unwrap();
-        if worker
-            .as_ref()
-            .map(|item| !item.handle.is_finished())
-            .unwrap_or(false)
-        {
+        if worker.is_some() {
             return;
         }
 
-        if let Some(old) = worker.take() {
-            old.cancel.store(true, Ordering::Relaxed);
-            let _ = old.handle.join();
-        }
-
-        let cancel = std::sync::Arc::new(AtomicBool::new(false));
-        let cancel2 = cancel.clone();
-        let delay = self.delay_queue();
+        let mut delay = self.delay_queue();
+        delay.transfer_interval_seconds = self.delay_transfer_interval_seconds.max(1);
         let target = RedisQueue::new(self.redis.clone(), &self.key);
-        let handle = std::thread::spawn(move || {
-            let _ = delay.transfer_loop(&target, cancel2);
+
+        // 到点后立即把当前所有到期消息转移到主队列；回调中忽略错误，下个周期自动重试
+        let period_ms = (delay.transfer_interval_seconds * 1000) as i64;
+        let timer = Timer::new(0, period_ms, move |_| {
+            let _ = delay.transfer_due(&target);
         });
-        *worker = Some(DelayWorker { cancel, handle });
+        timer.set_async(true);
+
+        *worker = Some(DelayWorker { timer });
     }
 }
 
@@ -641,8 +647,7 @@ impl<V> Drop for RedisReliableQueue<V> {
         let Some(worker) = self.delay_worker.get_mut().unwrap().take() else {
             return;
         };
-        worker.cancel.store(true, Ordering::Relaxed);
-        let _ = worker.handle.join();
+        worker.timer.cancel();
     }
 }
 

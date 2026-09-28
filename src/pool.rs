@@ -45,7 +45,9 @@ impl Pool {
         Arc::new(Self {
             config,
             factory: Arc::new(factory),
-            inner: Mutex::new(PoolInner { idle: VecDeque::new() }),
+            inner: Mutex::new(PoolInner {
+                idle: VecDeque::new(),
+            }),
             available: Condvar::new(),
             total: AtomicUsize::new(0),
         })
@@ -129,7 +131,8 @@ impl Pool {
             return false;
         }
 
-        if self.config.idle_time > 0 && entry.idle_since.elapsed().as_secs() >= self.config.idle_time
+        if self.config.idle_time > 0
+            && entry.idle_since.elapsed().as_secs() >= self.config.idle_time
         {
             return entry.client.ping().is_ok();
         }

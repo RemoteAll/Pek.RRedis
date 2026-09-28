@@ -48,7 +48,12 @@ where
 
     /// 消息数量（`LLEN`）。
     pub fn count(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"LLEN", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"LLEN", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -97,7 +102,10 @@ where
     /// 消费获取。`timeout_seconds < 0` 时不阻塞（`RPOP`），否则阻塞（`BRPOP`）。
     pub fn take_one(&self, timeout_seconds: i64) -> Result<Option<V>> {
         if timeout_seconds < 0 {
-            let rs = self.redis.redis().execute(&[b"RPOP", self.key.as_bytes()])?;
+            let rs = self
+                .redis
+                .redis()
+                .execute(&[b"RPOP", self.key.as_bytes()])?;
             return Ok(decode(rs));
         }
 

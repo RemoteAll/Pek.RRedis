@@ -123,7 +123,10 @@ impl FullRedis {
     /// 去掉键前缀（[`FullRedis::search`] 等返回值还原）。
     pub fn trim_key<'k>(&self, key: &'k str) -> &'k str {
         match &self.prefix {
-            Some(prefix) if key.len() >= prefix.len() && key[..prefix.len()].eq_ignore_ascii_case(prefix) => {
+            Some(prefix)
+                if key.len() >= prefix.len()
+                    && key[..prefix.len()].eq_ignore_ascii_case(prefix) =>
+            {
                 &key[prefix.len()..]
             }
             _ => key,
@@ -219,9 +222,10 @@ impl FullRedis {
         let mut dic = HashMap::with_capacity(keys.len());
         for (key, raw) in keys.iter().zip(values) {
             if let Some(bytes) = raw
-                && let Ok(v) = V::from_redis_payload(&bytes) {
-                    dic.insert((*key).to_string(), v);
-                }
+                && let Ok(v) = V::from_redis_payload(&bytes)
+            {
+                dic.insert((*key).to_string(), v);
+            }
         }
         Ok(dic)
     }
@@ -277,7 +281,9 @@ impl FullRedis {
     pub fn acquire_lock(&self, key: &str, ms_timeout: i32) -> Result<LockHandle> {
         match self.acquire_lock_ex(key, ms_timeout, ms_timeout, true)? {
             Some(lock) => Ok(lock),
-            None => Err(Error::Operation(format!("Lock [{key}] failed! msTimeout={ms_timeout}"))),
+            None => Err(Error::Operation(format!(
+                "Lock [{key}] failed! msTimeout={ms_timeout}"
+            ))),
         }
     }
 
@@ -521,7 +527,8 @@ impl FullRedis {
         value: V,
         expire_seconds: i64,
     ) -> Result<Option<V>> {
-        self.redis.set_get(&self.get_key(key), value, expire_seconds)
+        self.redis
+            .set_get(&self.get_key(key), value, expire_seconds)
     }
 
     /// `APPEND`（对应 C# `FullRedis.Append`）。
@@ -594,7 +601,8 @@ impl FullRedis {
 
     /// 重命名（`RENAME`，目标键自动补前缀）。
     pub fn rename(&self, key: &str, new_key: &str) -> Result<bool> {
-        self.redis.rename(&self.get_key(key), &self.get_key(new_key), true)
+        self.redis
+            .rename(&self.get_key(key), &self.get_key(new_key), true)
     }
 
     /// 异步删除（`UNLINK`，键自动补前缀）。
@@ -701,10 +709,16 @@ impl FullRedis {
         destination: &str,
         timeout_seconds: i64,
     ) -> Result<Option<V>> {
-        self.get_list::<V>(source).brpoplpush(destination, timeout_seconds)
+        self.get_list::<V>(source)
+            .brpoplpush(destination, timeout_seconds)
     }
 
-    fn push_list_values<V: ToRedisPayload>(&self, cmd: &[u8], key: &str, values: &[V]) -> Result<i64> {
+    fn push_list_values<V: ToRedisPayload>(
+        &self,
+        cmd: &[u8],
+        key: &str,
+        values: &[V],
+    ) -> Result<i64> {
         if values.is_empty() {
             return Ok(0);
         }
@@ -776,7 +790,12 @@ impl FullRedis {
         self.batch_set_values(b"SREM", key, members)
     }
 
-    fn batch_set_values<V: ToRedisPayload>(&self, cmd: &[u8], key: &str, members: &[V]) -> Result<i64> {
+    fn batch_set_values<V: ToRedisPayload>(
+        &self,
+        cmd: &[u8],
+        key: &str,
+        members: &[V],
+    ) -> Result<i64> {
         if members.is_empty() {
             return Ok(0);
         }
@@ -946,7 +965,11 @@ impl FullRedis {
         for k in keys {
             argv.push(self.get_key(k).into_bytes());
         }
-        argv.push(if from_left { b"LEFT".to_vec() } else { b"RIGHT".to_vec() });
+        argv.push(if from_left {
+            b"LEFT".to_vec()
+        } else {
+            b"RIGHT".to_vec()
+        });
         argv.push(b"COUNT".to_vec());
         argv.push(count.to_string().into_bytes());
 
@@ -1005,7 +1028,11 @@ impl FullRedis {
         max_len: i32,
     ) -> Result<Vec<i64>> {
         let key = self.get_key(key);
-        let mut argv: Vec<Vec<u8>> = vec![b"LPOS".to_vec(), key.into_bytes(), element.as_bytes().to_vec()];
+        let mut argv: Vec<Vec<u8>> = vec![
+            b"LPOS".to_vec(),
+            key.into_bytes(),
+            element.as_bytes().to_vec(),
+        ];
         if rank != 0 {
             argv.push(b"RANK".to_vec());
             argv.push(rank.to_string().into_bytes());
@@ -1095,11 +1122,9 @@ impl FullRedis {
     /// 随机成员（`ZRANDMEMBER key count`，对应 C# `ZRandMember<T>`，`count >= 0` 去重）。
     pub fn zrand_member<V: FromRedisPayload>(&self, key: &str, count: i64) -> Result<Vec<V>> {
         let key = self.get_key(key);
-        let rs = self.redis.execute(&[
-            b"ZRANDMEMBER",
-            key.as_bytes(),
-            count.to_string().as_bytes(),
-        ])?;
+        let rs =
+            self.redis
+                .execute(&[b"ZRANDMEMBER", key.as_bytes(), count.to_string().as_bytes()])?;
         Ok(decode_array(rs))
     }
 
@@ -1136,7 +1161,11 @@ impl FullRedis {
         for k in keys {
             argv.push(self.get_key(k).into_bytes());
         }
-        argv.push(if min { b"MIN".to_vec() } else { b"MAX".to_vec() });
+        argv.push(if min {
+            b"MIN".to_vec()
+        } else {
+            b"MAX".to_vec()
+        });
         argv.push(b"COUNT".to_vec());
         argv.push(count.to_string().into_bytes());
 
@@ -1353,12 +1382,8 @@ impl FullRedis {
     pub fn function_load(&self, library_code: &str, replace: bool) -> Result<String> {
         self.redis.require_version("7.0", "FUNCTION LOAD")?;
         let rs = if replace {
-            self.redis.execute(&[
-                b"FUNCTION",
-                b"LOAD",
-                b"REPLACE",
-                library_code.as_bytes(),
-            ])?
+            self.redis
+                .execute(&[b"FUNCTION", b"LOAD", b"REPLACE", library_code.as_bytes()])?
         } else {
             self.redis
                 .execute(&[b"FUNCTION", b"LOAD", library_code.as_bytes()])?
@@ -1370,12 +1395,10 @@ impl FullRedis {
     pub fn function_list(&self, library_name: Option<&str>) -> Result<Vec<RespValue>> {
         self.redis.require_version("7.0", "FUNCTION LIST")?;
         let rs = match library_name {
-            Some(name) => self.redis.execute(&[
-                b"FUNCTION",
-                b"LIST",
-                b"LIBRARYNAME",
-                name.as_bytes(),
-            ])?,
+            Some(name) => {
+                self.redis
+                    .execute(&[b"FUNCTION", b"LIST", b"LIBRARYNAME", name.as_bytes()])?
+            }
             None => self.redis.execute(&[b"FUNCTION", b"LIST"])?,
         };
         Ok(rs.into_array().unwrap_or_default())
@@ -1399,11 +1422,23 @@ impl FullRedis {
         let mut sb = String::new();
 
         // 连接数
-        push_metric(&mut sb, &inf, prefix, "connected_clients", "connected_clients");
+        push_metric(
+            &mut sb,
+            &inf,
+            prefix,
+            "connected_clients",
+            "connected_clients",
+        );
         push_metric(&mut sb, &inf, prefix, "blocked_clients", "blocked_clients");
         // 内存
         push_metric(&mut sb, &inf, prefix, "used_memory_bytes", "used_memory");
-        push_metric(&mut sb, &inf, prefix, "used_memory_rss_bytes", "used_memory_rss");
+        push_metric(
+            &mut sb,
+            &inf,
+            prefix,
+            "used_memory_rss_bytes",
+            "used_memory_rss",
+        );
         push_metric(
             &mut sb,
             &inf,
@@ -1427,8 +1462,20 @@ impl FullRedis {
             "instantaneous_ops_per_sec",
         );
         // CPU
-        push_metric(&mut sb, &inf, prefix, "used_cpu_sys_seconds", "used_cpu_sys");
-        push_metric(&mut sb, &inf, prefix, "used_cpu_user_seconds", "used_cpu_user");
+        push_metric(
+            &mut sb,
+            &inf,
+            prefix,
+            "used_cpu_sys_seconds",
+            "used_cpu_sys",
+        );
+        push_metric(
+            &mut sb,
+            &inf,
+            prefix,
+            "used_cpu_user_seconds",
+            "used_cpu_user",
+        );
         // 键空间（db0）
         if let Some(v) = inf.get("db0") {
             for part in v.split(',') {
@@ -1438,7 +1485,13 @@ impl FullRedis {
             }
         }
         // 复制
-        push_metric(&mut sb, &inf, prefix, "connected_slaves", "connected_slaves");
+        push_metric(
+            &mut sb,
+            &inf,
+            prefix,
+            "connected_slaves",
+            "connected_slaves",
+        );
 
         Ok(sb)
     }
@@ -1531,7 +1584,6 @@ impl SlowLogEntry {
     }
 }
 
-
 /// 分布式锁句柄。析构时自动释放（仅当锁值仍属于本实例的令牌）。
 pub struct LockHandle {
     redis: FullRedis,
@@ -1564,9 +1616,10 @@ impl LockHandle {
         self.has_lock = false;
 
         if let Ok(Some(value)) = self.redis.redis().get_string(&self.key)
-            && value.starts_with(&format!("{}|", self.token)) {
-                let _ = self.redis.redis().remove(&self.key);
-            }
+            && value.starts_with(&format!("{}|", self.token))
+        {
+            let _ = self.redis.redis().remove(&self.key);
+        }
     }
 }
 

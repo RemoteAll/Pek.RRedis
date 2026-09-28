@@ -35,7 +35,12 @@ where
 
     /// 元素个数（`LLEN`）。
     pub fn len(&self) -> Result<i64> {
-        Ok(int_or(self.redis.redis().execute(&[b"LLEN", self.key.as_bytes()])?, 0))
+        Ok(int_or(
+            self.redis
+                .redis()
+                .execute(&[b"LLEN", self.key.as_bytes()])?,
+            0,
+        ))
     }
 
     /// 是否为空。
@@ -72,7 +77,10 @@ where
     /// 出栈（`RPOP`）。`timeout_seconds < 0` 时立即返回，否则阻塞等待。
     pub fn take_one(&self, timeout_seconds: i64) -> Result<Option<V>> {
         if timeout_seconds < 0 {
-            let rs = self.redis.redis().execute(&[b"RPOP", self.key.as_bytes()])?;
+            let rs = self
+                .redis
+                .redis()
+                .execute(&[b"RPOP", self.key.as_bytes()])?;
             return Ok(decode(rs));
         }
 

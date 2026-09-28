@@ -64,8 +64,8 @@ fn live_basic_roundtrip_and_cross_format() {
     assert!(rds.redis().set(format!("{p}i"), 123_i64, 0).unwrap());
     assert!(rds.redis().set(format!("{p}b"), true, 0).unwrap());
 
-    let dt = NaiveDateTime::parse_from_str("2026-09-26 10:00:00.123", "%Y-%m-%d %H:%M:%S%.f")
-        .unwrap();
+    let dt =
+        NaiveDateTime::parse_from_str("2026-09-26 10:00:00.123", "%Y-%m-%d %H:%M:%S%.f").unwrap();
     assert!(rds.redis().set(format!("{p}d"), dt, 0).unwrap());
 
     // 原始字节应与 C# DefaultPacketEncoder 输出一致
@@ -77,7 +77,10 @@ fn live_basic_roundtrip_and_cross_format() {
         rds.redis().get_string(&format!("{p}d")).unwrap().unwrap(),
         "2026-09-26 10:00:00.123"
     );
-    assert_eq!(rds.redis().get::<bool>(&format!("{p}b")).unwrap(), Some(true));
+    assert_eq!(
+        rds.redis().get::<bool>(&format!("{p}b")).unwrap(),
+        Some(true)
+    );
     assert_eq!(
         rds.redis()
             .get::<NaiveDateTime>(&format!("{p}d"))
@@ -162,12 +165,19 @@ fn live_search_and_lock() {
     let lock = rds.acquire_lock_ex(&key, 1000, 3000, false).unwrap();
     assert!(lock.is_some());
     let other = Redis::with_prefix(rds.redis().create_sub(15).unwrap(), None);
-    assert!(other
-        .acquire_lock_ex(&key, 0, 3000, false)
-        .unwrap()
-        .is_none());
+    assert!(
+        other
+            .acquire_lock_ex(&key, 0, 3000, false)
+            .unwrap()
+            .is_none()
+    );
     drop(lock);
-    assert!(other.acquire_lock_ex(&key, 0, 3000, false).unwrap().is_some());
+    assert!(
+        other
+            .acquire_lock_ex(&key, 0, 3000, false)
+            .unwrap()
+            .is_some()
+    );
 
     rds.remove_pattern(&format!("{p}*")).unwrap();
 }
@@ -216,5 +226,8 @@ fn live_pubsub_roundtrip() {
 
     assert!(published > 0, "至少有一个订阅者收到消息");
     assert!(ready.load(Ordering::SeqCst));
-    assert_eq!(received.lock().unwrap().first().map(|s| s.as_str()), Some("hello"));
+    assert_eq!(
+        received.lock().unwrap().first().map(|s| s.as_str()),
+        Some("hello")
+    );
 }

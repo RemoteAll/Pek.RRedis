@@ -107,12 +107,11 @@ impl PubSub {
                 Ok(v) => {
                     if let Some(arr) = as_array(v)
                         && arr.len() == 3
-                            && arr[0].as_string().as_deref() == Some("message")
-                            && let (Some(ch), Some(msg)) =
-                                (arr[1].as_string(), arr[2].as_string())
-                            {
-                                on_message(&ch, &msg);
-                            }
+                        && arr[0].as_string().as_deref() == Some("message")
+                        && let (Some(ch), Some(msg)) = (arr[1].as_string(), arr[2].as_string())
+                    {
+                        on_message(&ch, &msg);
+                    }
                 }
                 Err(e) if is_timeout(&e) => continue,
                 Err(e) => return Err(e),
@@ -151,14 +150,12 @@ impl PubSub {
                 Ok(v) => {
                     if let Some(arr) = as_array(v)
                         && arr.len() == 4
-                            && arr[0].as_string().as_deref() == Some("pmessage")
-                            && let (Some(pattern), Some(ch), Some(msg)) = (
-                                arr[1].as_string(),
-                                arr[2].as_string(),
-                                arr[3].as_string(),
-                            ) {
-                                on_message(&pattern, &ch, &msg);
-                            }
+                        && arr[0].as_string().as_deref() == Some("pmessage")
+                        && let (Some(pattern), Some(ch), Some(msg)) =
+                            (arr[1].as_string(), arr[2].as_string(), arr[3].as_string())
+                    {
+                        on_message(&pattern, &ch, &msg);
+                    }
                 }
                 Err(e) if is_timeout(&e) => continue,
                 Err(e) => return Err(e),
@@ -197,12 +194,11 @@ impl PubSub {
                 Ok(v) => {
                     if let Some(arr) = as_array(v)
                         && arr.len() == 3
-                            && arr[0].as_string().as_deref() == Some("smessage")
-                            && let (Some(ch), Some(msg)) =
-                                (arr[1].as_string(), arr[2].as_string())
-                            {
-                                on_message(&ch, &msg);
-                            }
+                        && arr[0].as_string().as_deref() == Some("smessage")
+                        && let (Some(ch), Some(msg)) = (arr[1].as_string(), arr[2].as_string())
+                    {
+                        on_message(&ch, &msg);
+                    }
                 }
                 Err(e) if is_timeout(&e) => continue,
                 Err(e) => return Err(e),
