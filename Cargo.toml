@@ -11,15 +11,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # DH 基础库（DH.RustBase）：MD5 摘要、时间文本格式化等基础方法
 dhrust = { path = "../DH.RustBase" }
 rand = "0.8"
+rcgen = "0.13"
 rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 webpki-roots = "0.26"
-
-[dev-dependencies]
-rcgen = "0.13"
 
 [profile.release]
 lto = "thin"

@@ -94,6 +94,8 @@
 //! # }
 //! ```
 
+extern crate self as pek_rredis;
+
 pub mod async_api;
 pub mod client;
 pub mod cluster;
@@ -123,7 +125,9 @@ pub use full::{FullRedis, LockHandle, SlowLogEntry};
 pub use options::{RedisOptions, RedisPoolConfig, ServerMode};
 pub use redis::{Pipeline, Redis, ServerType};
 pub use resp::RespValue;
-pub use services::{acquire_red_lock, RedLock};
+pub use services::{
+    RedisDeferred, RedisEventBus, RedisStat, RedLock, acquire_red_lock,
+};
 pub use async_api::{
     AsyncFullRedis, AsyncHyperLogLog, AsyncRedis, AsyncRedisDelayQueue, AsyncRedisGeo,
     AsyncRedisHash, AsyncRedisList, AsyncRedisQueue, AsyncRedisReliableQueue,

@@ -11,6 +11,9 @@
 //   8) pubsub-publish / pubsub-subscribe：跨语言 PubSub（普通/模式/分片）
 //   9) write-advanced / verify-advanced：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION...）
 //  10) verify-ops / reset-ops / verify-ops-empty：运维 API 面互通（SLOWLOG/LATENCY）
+//  11) deferred-add / deferred-process：RedisDeferred 跨语言集合去重与批处理
+//  12) stat-stage / stat-process-once：RedisStat 跨语言统计聚合与延迟落盘
+//  13) eventbus-publish / eventbus-subscribe：RedisEventBus 跨语言事件发布与订阅
 //  11) exists  ：只读探针，检查某个键是否存在（给严格拓扑联调用）
 //  12) set-key ：写入任意单键字符串（给严格拓扑/TLS 联调用）
 //  13) selftest：离线校验编码器字节格式（无需 Redis）
@@ -26,7 +29,9 @@
 using System.Text;
 using NewLife.Caching;
 using NewLife.Caching.Queues;
+using NewLife.Caching.Services;
 using NewLife.Data;
+using NewLife.Messaging;
 
 Console.OutputEncoding = Encoding.UTF8;
 
@@ -37,6 +42,20 @@ string GetOpt(string name, string fallback)
 {
     var i = argsList.IndexOf(name);
     return i >= 0 && i + 1 < argsList.Count ? argsList[i + 1] : fallback;
+}
+
+String[] SplitCsv(String text) => text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+List<KeyValuePair<String, Int32>> ParsePairs(String text)
+{
+    var list = new List<KeyValuePair<String, Int32>>();
+    foreach (var item in SplitCsv(text))
+    {
+        var parts = item.Split('=', 2, StringSplitOptions.TrimEntries);
+        if (parts.Length == 2 && Int32.TryParse(parts[1], out var value))
+            list.Add(new KeyValuePair<String, Int32>(parts[0], value));
+    }
+    return list;
 }
 
 var config = GetOpt("--config", Environment.GetEnvironmentVariable("REDIS_CONFIG") ?? "server=127.0.0.1:6379;db=15");
@@ -165,6 +184,25 @@ switch (command)
         using (var rds = Connect()) VerifyAdvanced(rds);
         break;
 
+    case "deferred-add":
+        using (var rds = Connect()) DeferredAdd(rds, GetOpt("--name", "deferred:demo"), SplitCsv(GetOpt("--keys", "")));
+        break;
+
+    case "deferred-process":
+        using (var rds = Connect()) return DeferredProcess(rds, GetOpt("--name", "deferred:demo"), Int32.TryParse(GetOpt("--batch-size", "10"), out var dbs) ? dbs : 10, Int32.TryParse(GetOpt("--timeout", "10"), out var dpt) ? dpt : 10);
+
+    case "stat-stage":
+        using (var rds = Connect()) return StatStage(rds, GetOpt("--name", "stat:demo"), GetOpt("--key", "station:1"), ParsePairs(GetOpt("--pairs", "pv=1")), Int32.TryParse(GetOpt("--delay", "0"), out var ssd) ? ssd : 0);
+
+    case "stat-process-once":
+        using (var rds = Connect()) return await StatProcessOnce(rds, GetOpt("--name", "stat:demo"), Int32.TryParse(GetOpt("--timeout", "10"), out var spt) ? spt : 10);
+
+    case "eventbus-publish":
+        using (var rds = Connect()) return await EventBusPublish(rds, GetOpt("--topic", "eventbus:demo"), GetOpt("--group", "demo"), GetOpt("--name", $"event-from-{Side}"), Int32.TryParse(GetOpt("--count", "1"), out var ebc) ? ebc : 1);
+
+    case "eventbus-subscribe":
+        using (var rds = Connect()) return await EventBusSubscribe(rds, GetOpt("--topic", "eventbus:demo"), GetOpt("--group", "demo"), Int32.TryParse(GetOpt("--timeout", "10"), out var ebt) ? ebt : 10);
+
     case "verify-ops":
         using (var rds = Connect()) VerifyOps(rds);
         break;
@@ -207,7 +245,7 @@ switch (command)
         break;
 
     default:
-        Console.WriteLine($"未知命令：{command}（可用：selftest/set-key/write/verify/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+        Console.WriteLine($"未知命令：{command}（可用：selftest/set-key/write/verify/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/deferred-add/deferred-process/stat-stage/stat-process-once/eventbus-publish/eventbus-subscribe/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
         return 2;
 }
 
@@ -626,6 +664,109 @@ void Lock(FullRedis rds, int seconds)
     Console.WriteLine("  · 释放锁");
 }
 
+void DeferredAdd(FullRedis rds, String name, String[] keys)
+{
+    Console.WriteLine($"[deferred-add/{Side}] name={name} keys={String.Join(',', keys)}");
+    using var deferred = new RedisDeferred(rds, name);
+    var added = deferred.Add(keys);
+    Console.WriteLine($"  ✔ added={added}");
+}
+
+Int32 DeferredProcess(FullRedis rds, String name, Int32 batchSize, Int32 timeoutSeconds)
+{
+    Console.WriteLine($"[deferred-process/{Side}] name={name} batch-size={batchSize} timeout={timeoutSeconds}s");
+
+    using var deferred = new RedisDeferred(rds, name)
+    {
+        BatchSize = batchSize,
+        Period = 100,
+    };
+
+    var done = new TaskCompletionSource<String[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+    deferred.Process += (_, e) =>
+    {
+        var keys = (e.Keys ?? []).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        done.TrySetResult(keys);
+    };
+
+    _ = deferred.Add();
+
+    if (!done.Task.Wait(TimeSpan.FromSeconds(timeoutSeconds)))
+    {
+        Console.WriteLine("  ✘ timeout waiting deferred batch");
+        return 1;
+    }
+
+    var keys = done.Task.Result;
+    Console.WriteLine($"  ✔ processed={keys.Length} keys={String.Join(',', keys)}");
+    return 0;
+}
+
+Int32 StatStage(FullRedis rds, String name, String key, IList<KeyValuePair<String, Int32>> pairs, Int32 delay)
+{
+    Console.WriteLine($"[stat-stage/{Side}] name={name} key={key} delay={delay}s pairs={String.Join(',', pairs.Select(e => $"{e.Key}={e.Value}"))}");
+    using var stat = new RedisStat(rds, name) { OnSave = (_, _) => { } };
+    foreach (var item in pairs) stat.Increment(key, item.Key, item.Value);
+    stat.AddDelayQueue(key, delay);
+    Console.WriteLine("  ✔ queued=1");
+    return 0;
+}
+
+async Task<Int32> StatProcessOnce(FullRedis rds, String name, Int32 timeoutSeconds)
+{
+    Console.WriteLine($"[stat-process-once/{Side}] name={name} timeout={timeoutSeconds}s");
+
+    var done = new TaskCompletionSource<(String Key, IDictionary<String, Int32> Data)>(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var stat = new RedisStat(rds, name)
+    {
+        OnSave = (key, data) => done.TrySetResult((key, new Dictionary<String, Int32>(data)))
+    };
+
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+    try
+    {
+        var result = await done.Task.WaitAsync(cts.Token);
+        var text = String.Join(',', result.Data.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => $"{e.Key}={e.Value}"));
+        Console.WriteLine($"  ✔ key={result.Key} data={text}");
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("  ✘ timeout waiting stat save");
+        return 1;
+    }
+}
+
+async Task<Int32> EventBusPublish(FullRedis rds, String topic, String group, String name, Int32 count)
+{
+    Console.WriteLine($"[eventbus-publish/{Side}] topic={topic} group={group} name={name} count={count}");
+    using var bus = new RedisEventBus<ServiceEventDemo>(rds, topic, group);
+    await bus.PublishAsync(new ServiceEventDemo { Name = name, Count = count });
+    Console.WriteLine("  ✔ published=1");
+    return 0;
+}
+
+async Task<Int32> EventBusSubscribe(FullRedis rds, String topic, String group, Int32 timeoutSeconds)
+{
+    Console.WriteLine($"[eventbus-subscribe/{Side}] topic={topic} group={group} timeout={timeoutSeconds}s");
+    using var bus = new RedisEventBus<ServiceEventDemo>(rds, topic, group);
+
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+    try
+    {
+        var receiveTask = bus.ReceiveAsync(cts.Token);
+        Console.WriteLine("  · ready");
+        var result = await receiveTask;
+        Console.WriteLine($"  ✔ name={result.Name} count={result.Count}");
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("  ✘ timeout waiting event");
+        return 1;
+    }
+}
+
 void Report(FullRedis rds)
 {
     Console.WriteLine($"[report/{Side}] 双方回执");
@@ -844,7 +985,7 @@ async Task StreamConsume(FullRedis rds, int count, string group, bool noAck, int
     foreach (var m in msgs)
     {
         Console.WriteLine($"  · {m.Id} body=[{string.Join(",", m.Body ?? [])}]");
-        ids.Add(m.Id);
+        if (!String.IsNullOrEmpty(m.Id)) ids.Add(m.Id);
     }
 
     if (!noAck)
@@ -936,4 +1077,10 @@ public class DemoReceipt
     public List<String> Failures { get; set; } = [];
 
     public String ToJsonText() => System.Text.Json.JsonSerializer.Serialize(this);
+}
+
+public class ServiceEventDemo
+{
+    public String Name { get; set; } = "";
+    public Int32 Count { get; set; }
 }

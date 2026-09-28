@@ -27,6 +27,11 @@
 | Sentinel 拓扑 | C# `mode=sentinel` 写入 → Rust 直连 master 读到且 replica 读不到；Rust `mode=sentinel` 写入 → C# 直连 master 读到且 replica 读不到 |
 | Cluster 拓扑 | C# `mode=cluster` 对命中 5461..16383 槽位的 `{...}` key 写入 → Rust 直连 seed 读不到、直连目标节点读到；Rust 反向同理 |
 | 运维 API | 在同一份预置 slowlog/latency 样本上，C# 与 Rust 都能读到同一结果；随后分别由一侧执行 `SLOWLOG RESET` / `LATENCY RESET`，另一侧确认样本已清空 |
+| TLS 传输 | C# 与 Rust 都通过 `rediss://` / `Ssl=true` 连接同一个自签名 TLS mock Redis，双向完成固定样本 `write` / `verify` |
+| Async API | C# `write` → Rust `verify-async`；Rust `write-async` → C# `verify`；C# `push` → Rust `consume-async`；Rust `push-async` → C# `consume` |
+| RedisDeferred | Rust `deferred-add` → C# `deferred-process` 读到去重批次；C# `deferred-add` → Rust `deferred-process` 反向同理 |
+| RedisStat | Rust `stat-stage`（HASH 累加 + AddDelayQueue）→ C# `stat-process-once` 读到 `pv/uv` 聚合结果；C# `stat-stage` → Rust `stat-process-once` 反向同理 |
+| RedisEventBus | C# 先起 `eventbus-subscribe`，Rust `eventbus-publish` 后收到 `name/count`；Rust 先起订阅，C# 发布后收到同样事件 |
 | 可靠队列 | C# `push` → Rust `consume`；Rust `push` → C# `consume`；双方 `qstatus` |
 | Stream | C# `stream-push` → Rust `stream-consume`；Rust `stream-push` → C# `stream-consume`；C# `--no-ack` → Rust `--retry-seconds 0` 抢回；双方 `stream-status` |
 | 延迟队列 | C# `delay-push` → Rust `delay-consume`；Rust `delay-push` → C# `delay-consume` |
@@ -38,12 +43,11 @@
 
 ## 当前尚未纳入严格门槛的范围
 
-下面这些能力虽然已有源码审计、parity/mock/live 测试或语义对齐保证，但还没有全部做成 C#↔Rust 的双边 live 矩阵，因此在本文件口径下不算“严格通过”：
+当前迁移范围内的核心互通/拓扑/运维/异步能力，以及 `RedisDeferred` / `RedisStat` / `RedisEventBus` 这三块服务层语义，已经全部做成 C#↔Rust 的双边 live 矩阵并纳入严格 gate。现在剩下未纳入 strict live gate 的范围，收敛到下面这一类真正的宿主专属适配层：
 
 | 范围 | 现状 |
 | ---- | ---- |
-| TLS / rediss | Rust 侧已支持并有本地 TLS 单测，但缺少 C#↔Rust 同实例 TLS 联调 |
-| Async API | Rust async 包装已补齐并通过测试，但尚未形成独立的跨语言 live 验收维度 |
+| .NET 宿主接口层 | `RedisCacheProvider`、`CacheExtensions` 这类依赖 ASP.NET / DI / .NET 接口抽象的宿主适配层不做 1:1 迁移；Rust 侧改由当前 Web/服务框架自己的状态注入与工厂方式承接 |
 
 ## 执行
 

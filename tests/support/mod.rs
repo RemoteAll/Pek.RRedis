@@ -16,6 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rcgen::generate_simple_self_signed;
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
 use pek_rredis::FullRedis;
 use pek_rredis::resp::{Decoder, RespValue};
 
@@ -236,6 +240,68 @@ pub fn start_mock_redis_on(port: u16) -> MockRedis {
     }
 }
 
+/// 在指定端口启动 TLS 迷你 Redis（`port=0` 表示随机端口）。证书为运行时自签名，仅用于测试。
+pub fn start_mock_redis_tls_on(port: u16) -> MockRedis {
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("无法绑定测试端口");
+    let addr = listener.local_addr().unwrap().to_string();
+    listener.set_nonblocking(true).unwrap();
+
+    let certified = generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("生成 TLS 证书失败");
+    let cert_der = certified.cert.der().clone();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certified.key_pair.serialize_der(),
+    ));
+    let tls_config = Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .expect("创建 TLS 服务端配置失败"),
+    );
+
+    let store: Arc<Mutex<Store>> = Arc::new(Mutex::new(Store::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let handle = {
+        let store = store.clone();
+        let stop = stop.clone();
+        let tls_config = tls_config.clone();
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let store = store.clone();
+                        let tls_config = tls_config.clone();
+                        thread::spawn(move || {
+                            stream.set_nodelay(true).ok();
+                            stream.set_nonblocking(false).ok();
+                            stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
+                            if let Ok(conn) = ServerConnection::new(tls_config) {
+                                let tls_stream = StreamOwned::new(conn, stream);
+                                let _ = handle_conn_duplex(tls_stream, store);
+                            }
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
+    MockRedis {
+        addr,
+        store,
+        stop,
+        handle: Some(handle),
+    }
+}
+
 /// 连接迷你 Redis 的 `FullRedis`（db=0，无密码，无前缀）。
 pub fn mock_full() -> (MockRedis, FullRedis) {
     let server = start_mock_redis();
@@ -290,6 +356,59 @@ fn handle_conn(stream: TcpStream, store: Arc<Mutex<Store>>) -> std::io::Result<(
         if !reply.is_empty() {
             writer.write_all(&reply)?;
             writer.flush()?;
+        }
+        if quit {
+            cleanup_connection(&store, conn_id, &mut subscriptions);
+            return Ok(());
+        }
+    }
+}
+
+fn handle_conn_duplex<S>(stream: S, store: Arc<Mutex<Store>>) -> std::io::Result<()>
+where
+    S: std::io::Read + std::io::Write,
+{
+    let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst);
+    let (pubsub_tx, pubsub_rx) = mpsc::channel::<Bytes>();
+    {
+        let mut locked = store.lock().unwrap();
+        locked.pubsub.connections.insert(conn_id, pubsub_tx);
+    }
+
+    let mut stream = std::io::BufReader::new(stream);
+    let mut subscriptions = ConnectionSubscriptions::default();
+
+    loop {
+        drain_pubsub_messages(stream.get_mut(), &pubsub_rx)?;
+
+        let value = match Decoder::new(&mut stream).read_value() {
+            Ok(v) => v,
+            Err(pek_rredis::Error::Io(io))
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => continue,
+            Err(_) => {
+                cleanup_connection(&store, conn_id, &mut subscriptions);
+                return Ok(());
+            }
+        };
+
+        let args: Vec<Bytes> = match value {
+            RespValue::Array(items) => items
+                .into_iter()
+                .map(|v| v.as_bytes().unwrap_or_default())
+                .collect(),
+            _ => return Ok(()),
+        };
+        if args.is_empty() {
+            continue;
+        }
+
+        let (reply, quit) = dispatch(&store, conn_id, &mut subscriptions, &args);
+        if !reply.is_empty() {
+            stream.get_mut().write_all(&reply)?;
+            stream.get_mut().flush()?;
         }
         if quit {
             cleanup_connection(&store, conn_id, &mut subscriptions);
@@ -2548,7 +2667,7 @@ enum SubscriptionKind {
     Shard,
 }
 
-fn drain_pubsub_messages(writer: &mut TcpStream, receiver: &Receiver<Bytes>) -> std::io::Result<()> {
+fn drain_pubsub_messages<W: std::io::Write>(writer: &mut W, receiver: &Receiver<Bytes>) -> std::io::Result<()> {
     loop {
         match receiver.try_recv() {
             Ok(message) => {

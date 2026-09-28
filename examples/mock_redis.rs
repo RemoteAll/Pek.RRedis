@@ -99,8 +99,13 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(16_379);
+    let tls = args.iter().any(|a| a == "--tls");
 
-    let server = support::start_mock_redis_on(port);
+    let server = if tls {
+        support::start_mock_redis_tls_on(port)
+    } else {
+        support::start_mock_redis_on(port)
+    };
 
     if let Some(mode) = get_opt("--info-mode") {
         support::set_info_mode(&server, &mode);
@@ -128,7 +133,11 @@ fn main() {
         seed_latency_file(&server, &path);
     }
 
-    println!("[mock_redis] 已启动：{}（RESP2 子集实现，按 Enter 退出）", server.addr);
+    println!(
+        "[mock_redis] 已启动：{}（RESP2 子集实现{}，按 Enter 退出）",
+        server.addr,
+        if tls { "，TLS 自签名" } else { "" }
+    );
     println!("MOCK_ADDR={}", server.addr);
 
     let mut line = String::new();

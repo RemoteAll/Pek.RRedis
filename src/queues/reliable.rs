@@ -22,8 +22,14 @@ use crate::error::{Error, Result};
 use crate::full::FullRedis;
 use crate::queues::base::QueueSettings;
 use crate::queues::delay::RedisDelayQueue;
+use crate::queues::queue::RedisQueue;
 use crate::queues::status::{RedisQueueStatus, new_consumer_key};
 use crate::util::{decode, int_or, payload};
+
+struct DelayWorker {
+    cancel: std::sync::Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
 
 /// 可靠队列。
 pub struct RedisReliableQueue<V> {
@@ -40,6 +46,7 @@ pub struct RedisReliableQueue<V> {
     all_status_key: String,
     status: Mutex<RedisQueueStatus>,
     next_retry: Mutex<NaiveDateTime>,
+    delay_worker: Mutex<Option<DelayWorker>>,
     settings: QueueSettings,
     /// 消费者死信超时判定步长（秒）。默认 60，对应 C# `RetryInterval`
     pub retry_interval_seconds: i64,
@@ -68,6 +75,7 @@ where
             consumer_key,
             status: Mutex::new(status),
             next_retry: Mutex::new(NaiveDateTime::default()),
+            delay_worker: Mutex::new(None),
             settings: QueueSettings::default(),
             retry_interval_seconds: 60,
             _marker: PhantomData,
@@ -591,8 +599,50 @@ where
     }
 
     /// 添加延迟消息。
-    pub fn add_delay(&self, value: &V, delay_seconds: i64) -> Result<i64> {
+    pub fn add_delay(&self, value: &V, delay_seconds: i64) -> Result<i64>
+    where
+        V: 'static,
+    {
+        self.ensure_delay_worker();
         self.delay_queue().add(value, delay_seconds)
+    }
+
+    fn ensure_delay_worker(&self)
+    where
+        V: 'static,
+    {
+        let mut worker = self.delay_worker.lock().unwrap();
+        if worker
+            .as_ref()
+            .map(|item| !item.handle.is_finished())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        if let Some(old) = worker.take() {
+            old.cancel.store(true, Ordering::Relaxed);
+            let _ = old.handle.join();
+        }
+
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel2 = cancel.clone();
+        let delay = self.delay_queue();
+        let target = RedisQueue::new(self.redis.clone(), &self.key);
+        let handle = std::thread::spawn(move || {
+            let _ = delay.transfer_loop(&target, cancel2);
+        });
+        *worker = Some(DelayWorker { cancel, handle });
+    }
+}
+
+impl<V> Drop for RedisReliableQueue<V> {
+    fn drop(&mut self) {
+        let Some(worker) = self.delay_worker.get_mut().unwrap().take() else {
+            return;
+        };
+        worker.cancel.store(true, Ordering::Relaxed);
+        let _ = worker.handle.join();
     }
 }
 

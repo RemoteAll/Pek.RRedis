@@ -4,7 +4,7 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 两边连接**同一个 Redis**、使用**同一套键与字节格式**，业务可以一个用例一个用例地从 C# 搬到 Rust，
 而不是推倒重来；最终用 Rust 整体替换 C# 客户端。
 
-```
+```text
 ┌─────────────────────────┐        ┌─────────────────────────┐
 │  C# 现有系统（DH.NRedis）│        │  Rust 新代码（Pek.RRedis）│
 │  FullRedis / RedisHash  │  互通  │  FullRedis / RedisHash  │
@@ -21,7 +21,7 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 ## 一、当前能力（v0.1.0）
 
 | 模块 | 对应 DH.NRedis | 状态 |
-|------|----------------|------|
+| ---- | -------------- | ---- |
 | `resp` | `RedisClient` 组包/解析 | ✅ RESP2 全量 + RESP3（Map/Set/Double/Bool/Null/Verbatim/Push/Attribute） |
 | `client` | `RedisClient`（TCP、AUTH、SELECT、HELLO） | ✅ 含超时、惰性握手、断线标记 |
 | `pool` | `ObjectPool<RedisClient>` | ✅ Min/Max/IdleTime/MaxLifetime/WaitTimeout，空闲 PING 健康检查 |
@@ -37,12 +37,13 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 | `RedisStream`（Stream 消息队列） | 同名 | ✅ `XADD`/`XRANGE`/`XREAD`/`XREADGROUP`/`XACK`/`XPENDING`/`XCLAIM`/`XGROUP`/`XINFO`/`XTRIM`/`XDEL`；`__data` 基元约定、对象字段扁平化、消费组、死信抢占（`retry_ack`） |
 | `RedisRedLock` | `Services.RedisRedLock` | ✅ `acquire_red_lock`：quorum/令牌回滚/`EVAL` 比较删除，与 C# 算法逐行一致 |
 | Tair 扩展（阿里云） | `FullRedis.Ex*` | ✅ `ex_set`/`ex_get`/`ex_incr_by`/`ex_hset`/`ex_hget`/`ex_hmget`/`ex_hget_with_ver`/`ex_hincr_by`/`ex_hpttl`/`ex_hkeys`/`ex_hvals`/`ex_hlen`/`ex_hdel`（需 Tair 实例） |
-| `Clusters`（Cluster/Sentinel/Replication） | 同名 | ✅ 已支持 Cluster / Sentinel / Replication：`CLUSTER NODES` 解析、slot/hash tag 路由、`MOVED`/`ASK`/`ASKING`、链式重定向、`mode=cluster|sentinel|replication` 与 `autoDetect` 自动加载拓扑、`TopologyRefreshSeconds` 刷新、单 key/多 key/搜索聚合、读副本与节点 shielding/backoff |
-| `RedisEventBus` / ASP.NET 集成（`RedisCacheProvider`/`RedisStat`/`RedisDeferred`/`CacheExtensions`） | `Services` | ➖ 不迁移（.NET 运行时专属，见审计说明） |
+| `Clusters`（Cluster/Sentinel/Replication） | 同名 | ✅ 已支持 Cluster / Sentinel / Replication：`CLUSTER NODES` 解析、slot/hash tag 路由、`MOVED`/`ASK`/`ASKING`、链式重定向、`mode=cluster\|sentinel\|replication` 与 `autoDetect` 自动加载拓扑、`TopologyRefreshSeconds` 刷新、单 key/多 key/搜索聚合、读副本与节点 shielding/backoff |
+| `RedisEventBus` / `RedisStat` / `RedisDeferred` | `services::{RedisEventBus, RedisStat, RedisDeferred}` | ✅ 已提供 Rust 原生服务层封装，并已纳入 strict live gate；保留同等 Redis 语义，但不复刻 .NET DI / TimerX / `IEventBus` 宿主接口 |
+| ASP.NET 集成（`RedisCacheProvider`/`CacheExtensions`） | 应用层状态注入 / 工厂函数 | ➖ 不做 1:1 迁移（宿主接口由 Rust Web/服务框架自身提供） |
 | TLS | `Ssl`/`Tls`/`rediss://` | ✅ 已支持：`rediss://`、`Ssl=true`/`Tls=true`、`TlsServerName`、`TlsInsecure`；基于 rustls，同步客户端可直接走 TLS 连接 |
 | 异步 API | `*Async` | ✅ 已覆盖 `AsyncRedis`/`AsyncFullRedis`、Hash/List/Set/SortedSet/Stack/Geo/HyperLogLog、PubSub、Queue/ReliableQueue/DelayQueue/Stream，且关键 direct/helper 命令已提供显式 async 入口；统一基于 tokio `spawn_blocking` 复用现有同步语义 |
 
-测试：**158 项**（76 单元 + 78 集成/端到端测试（10 async + 25 互通 + 22 审计 + 16 cluster 路由 + 5 live）+ 4 文档），
+测试：**165 项**（83 单元 + 78 集成/端到端测试（10 async + 25 互通 + 22 审计 + 16 cluster 路由 + 5 live）+ 4 文档），
 `cargo test` 离线全绿，`cargo clippy --all-targets` 零告警；另有 C#/Rust 两个可执行 Demo 做交叉验证（见第四节）。
 
 ### 与 C# 全量 API 审计（2026-09-26 复核）
@@ -68,7 +69,7 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 ### 值编码（`encoder`）
 
 | 数据类型 | 编码结果（两端一致） | 读取兼容 |
-|----------|----------------------|----------|
+| -------- | -------------------- | -------- |
 | `null` | 空数据包 | — |
 | 字符串 | 原始 UTF-8，**不加引号** | — |
 | `Byte[]` | 原始二进制 | — |
@@ -95,7 +96,7 @@ Pek 生态的 Rust Redis 客户端（独立项目）：让 C#/.NET 项目（DH.N
 ### 队列布局（可靠队列）
 
 | 键 | 格式 | 说明 |
-|----|------|------|
+| -- | ---- | ---- |
 | `{key}` | List | 主队列，`LPUSH` 生产、`RPOPLPUSH` 消费 |
 | `{key}:Ack:{ukey}` | List | 确认队列，`ukey` 为 8 位随机串（每消费者一份） |
 | `{key}:Status:{ukey}` | String(JSON) | 消费者状态（PascalCase、ISO 时间），7 天过期 |
@@ -178,7 +179,7 @@ fn main() -> Result<()> {
 
 ```powershell
 cd G:\Code\Pek.Rust\Pek.RRedis
-cargo test          # 148 项测试，离线可跑（含进程内迷你 Redis 端到端）
+cargo test          # 165 项测试，离线可跑（含进程内迷你 Redis 端到端）
 cargo clippy        # 零告警
 ```
 
@@ -198,7 +199,7 @@ cargo test --test live_redis -- --nocapture
 仓库内置两个命令与样本**逐项对应**的演示程序，互为验证（详见 [`demo/README.md`](demo/README.md)）：
 
 | 侧 | 程序 | 运行方式 |
-|----|------|----------|
+| -- | ---- | -------- |
 | C# | `demo/csharp/PekRRedisDemo`（引用 DH.NRedis 源码工程） | `dotnet run --project demo\csharp\PekRRedisDemo -- auto --config "<连接串>"` |
 | Rust | `examples/demo.rs` | `cargo run --example demo -- auto --config "<连接串>"` |
 
@@ -234,7 +235,7 @@ cargo run --example demo -- verify --config "server=127.0.0.1:16379;db=0"       
 ## 五、C# ↔ Rust 概念对照
 
 | C# / DH.NRedis | Rust / pek-rredis |
-|----------------|-------------------|
+| -------------- | ----------------- |
 | `new FullRedis(server, pwd, db)` / `Init(config)` | `FullRedis::open` / `FullRedis::from_config` |
 | `Redis` | `Redis`（`set/get/add/replace/get_all/set_all/eval/pipeline`…） |
 | `RedisClient` | `client::RedisClient`（单连接），`pool::Pool`（连接池） |
@@ -269,14 +270,14 @@ cargo run --example demo -- verify --config "server=127.0.0.1:16379;db=0"       
 8. **Tair `Ex*`**：仅阿里云 Tair（KVStore）实例可用；标准 Redis 执行会返回未知命令（与 C# 行为相同）。
 9. **`AutoPipeline`/`FullPipeline`**：C# 的自动管道优化未复刻，Rust 使用显式 `pipeline()`（语义等价）。
 10. **异步 wrapper 覆盖面**：当前已覆盖 `Redis` / `FullRedis` / Hash / List / Set / SortedSet / Stack / Geo / HyperLogLog / PubSub / 普通队列 / 可靠队列 / 延迟队列 / Stream；关键 direct/helper 方法已提供显式 async 入口，其余极少数长尾能力仍可通过 `with_sync` 复用同步实现。
-11. **.NET 专属服务类不迁移**：`RedisStat`/`RedisDeferred`/`RedisEventBus`/`RedisCacheProvider`/`CacheExtensions`（依赖 TimerX/依赖注入）。
+11. **仅宿主适配层不做 1:1 迁移**：`RedisCacheProvider`/`CacheExtensions` 这类依赖 .NET DI/接口抽象的宿主层不直接照搬；对应 Redis 语义已由 `RedisEventBus` / `RedisStat` / `RedisDeferred` 与现有 `FullRedis`/队列工厂覆盖。
 
 ---
 
 ## 七、路线图（2026-09-26 更新）
 
 | 阶段 | 内容 |
-|------|------|
+| ---- | ---- |
 | v0.2 | 集群/哨兵/主从（`Cluster`/`Sentinel`/`Replication`）；RESP3 推送与 `CLIENT TRACKING` |
 | v0.3 | 可选：进一步细化零散 async 公开面与错误分类，或演进为原生 async socket/RESP 栈 |
 | v1.0 | 与 DH.NRedis 的 XUnitTest 跑同一套集成测试做双向互操作回归 |

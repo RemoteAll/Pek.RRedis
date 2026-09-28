@@ -156,6 +156,7 @@ function Start-MockRedis {
     param(
         [string]$Name,
         [int]$Port,
+        [bool]$Tls,
         [string]$InfoMode,
         [string]$InfoText,
         [string]$InfoReplication,
@@ -172,6 +173,9 @@ function Start-MockRedis {
 
     $files = @()
     $args = @("--port", $Port)
+    if ($Tls) {
+        $args += "--tls"
+    }
     if ($InfoMode) {
         $args += @("--info-mode", $InfoMode)
     }
@@ -257,8 +261,8 @@ function Test-ReplicationInterop {
     $masterInfo = "# Replication`r`nrole:master`r`nconnected_slaves:1`r`nslave0:ip=127.0.0.1,port=$replicaPort,state=online,offset=1,lag=0`r`n"
     $replicaInfo = "# Replication`r`nrole:slave`r`nmaster_host:127.0.0.1`r`nmaster_port:$masterPort`r`nconnected_slaves:0`r`n"
 
-    $master = Start-MockRedis -Name "strict-repl-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
-    $replica = Start-MockRedis -Name "strict-repl-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $master = Start-MockRedis -Name "strict-repl-master" -Port $masterPort -Tls $false -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $replica = Start-MockRedis -Name "strict-repl-replica" -Port $replicaPort -Tls $false -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
     try {
         $topologyConfig = "server=$masterAddr,$replicaAddr;db=0;mode=replication;readfromreplicas=true"
         $masterConfig = "server=$masterAddr;db=0"
@@ -300,9 +304,9 @@ function Test-SentinelInterop {
     $masterInfo = "# Replication`r`nrole:master`r`nconnected_slaves:1`r`nslave0:ip=127.0.0.1,port=$replicaPort,state=online,offset=1,lag=0`r`n"
     $replicaInfo = "# Replication`r`nrole:slave`r`nmaster_host:127.0.0.1`r`nmaster_port:$masterPort`r`nconnected_slaves:0`r`n"
 
-    $sentinel = Start-MockRedis -Name "strict-sentinel" -Port $sentinelPort -InfoMode "" -InfoText $sentinelInfo -InfoReplication "" -InfoSentinel $sentinelInfo -ClusterNodes "" -SlowlogData "" -LatencyData ""
-    $master = Start-MockRedis -Name "strict-sentinel-master" -Port $masterPort -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
-    $replica = Start-MockRedis -Name "strict-sentinel-replica" -Port $replicaPort -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $sentinel = Start-MockRedis -Name "strict-sentinel" -Port $sentinelPort -Tls $false -InfoMode "" -InfoText $sentinelInfo -InfoReplication "" -InfoSentinel $sentinelInfo -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $master = Start-MockRedis -Name "strict-sentinel-master" -Port $masterPort -Tls $false -InfoMode "" -InfoText "" -InfoReplication $masterInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $replica = Start-MockRedis -Name "strict-sentinel-replica" -Port $replicaPort -Tls $false -InfoMode "" -InfoText "" -InfoReplication $replicaInfo -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
     try {
         $topologyConfig = "server=$sentinelAddr;db=0;mode=sentinel;sentinelmastername=redis-master;readfromreplicas=true"
         $masterConfig = "server=$masterAddr;db=0"
@@ -342,8 +346,8 @@ function Test-ClusterInterop {
     $targetAddr = "127.0.0.1:$targetPort"
     $clusterNodes = "master-a $seedAddr@0 master - 0 0 1 connected 0-5460`nmaster-b $targetAddr@0 master - 0 0 2 connected 5461-16383"
 
-    $seed = Start-MockRedis -Name "strict-cluster-seed" -Port $seedPort -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes $clusterNodes -SlowlogData "" -LatencyData ""
-    $target = Start-MockRedis -Name "strict-cluster-target" -Port $targetPort -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    $seed = Start-MockRedis -Name "strict-cluster-seed" -Port $seedPort -Tls $false -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes $clusterNodes -SlowlogData "" -LatencyData ""
+    $target = Start-MockRedis -Name "strict-cluster-target" -Port $targetPort -Tls $false -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
     try {
         $topologyConfig = "server=$seedAddr;db=0;mode=cluster"
         $seedConfig = "server=$seedAddr;db=0"
@@ -387,7 +391,7 @@ function Test-OperationalInterop {
     $slowlogSeed = "101|1727424000|12345|SET ops:key 42"
     $latencySeed = "command|1727424001|15|42"
 
-    $caseA = Start-MockRedis -Name "strict-ops-csharp-reset" -Port $portA -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData $slowlogSeed -LatencyData $latencySeed
+    $caseA = Start-MockRedis -Name "strict-ops-csharp-reset" -Port $portA -Tls $false -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData $slowlogSeed -LatencyData $latencySeed
     try {
         Invoke-CSharpDemo @("verify-ops", "--config", $configA, "--prefix", $Prefix) | Out-Host
         Invoke-RustDemo @("verify-ops", "--config", $configA, "--prefix", $Prefix) | Out-Host
@@ -398,7 +402,7 @@ function Test-OperationalInterop {
         Stop-MockRedis $caseA
     }
 
-    $caseB = Start-MockRedis -Name "strict-ops-rust-reset" -Port $portB -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData $slowlogSeed -LatencyData $latencySeed
+    $caseB = Start-MockRedis -Name "strict-ops-rust-reset" -Port $portB -Tls $false -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData $slowlogSeed -LatencyData $latencySeed
     try {
         Invoke-RustDemo @("verify-ops", "--config", $configB, "--prefix", $Prefix) | Out-Host
         Invoke-RustDemo @("reset-ops", "--config", $configB, "--prefix", $Prefix) | Out-Host
@@ -528,6 +532,105 @@ function Test-PubSubInterop {
     }
 }
 
+function Test-TlsInterop {
+    $port = 16389
+    $tlsServer = Start-MockRedis -Name "strict-tls" -Port $port -Tls $true -InfoMode "" -InfoText "" -InfoReplication "" -InfoSentinel "" -ClusterNodes "" -SlowlogData "" -LatencyData ""
+    try {
+        $tlsConfig = "server=rediss://127.0.0.1:$port;db=0;ssl=true;tlsinsecure=true;tlsservername=localhost"
+        Invoke-RustDemo @("clean", "--config", $tlsConfig, "--prefix", $Prefix) | Out-Host
+        Invoke-CSharpDemo @("clean", "--config", $tlsConfig, "--prefix", $Prefix) | Out-Host
+
+        $cWrite = Invoke-CSharpDemo @("write", "--config", $tlsConfig, "--prefix", $Prefix)
+        $rVerify = Invoke-RustDemo @("verify", "--config", $tlsConfig, "--prefix", $Prefix)
+        $rWrite = Invoke-RustDemo @("write", "--config", $tlsConfig, "--prefix", $Prefix)
+        $cVerify = Invoke-CSharpDemo @("verify", "--config", $tlsConfig, "--prefix", $Prefix)
+        Assert-Text $rVerify 'rust:receipt' "Rust TLS verify did not write receipt"
+        Assert-Text $cVerify 'csharp:receipt' "C# TLS verify did not write receipt"
+    }
+    finally {
+        Stop-MockRedis $tlsServer
+    }
+}
+
+function Test-AsyncInterop {
+    $prefix = "${Prefix}async:"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $prefix) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $prefix) | Out-Host
+
+    $cWrite = Invoke-CSharpDemo @("write", "--config", $Config, "--prefix", $prefix)
+    $rVerify = Invoke-RustDemo @("verify-async", "--config", $Config, "--prefix", $prefix)
+    $rWrite = Invoke-RustDemo @("write-async", "--config", $Config, "--prefix", $prefix)
+    $cVerify = Invoke-CSharpDemo @("verify", "--config", $Config, "--prefix", $prefix)
+    Assert-Text $rVerify 'rust:receipt' "Rust async verify did not write receipt"
+    Assert-Text $cVerify 'csharp:receipt' "C# verify did not confirm Rust async write"
+
+    $cPush = Invoke-CSharpDemo @("push", "--count", "3", "--config", $Config, "--prefix", $prefix)
+    $rConsume = Invoke-RustDemo @("consume-async", "--count", "3", "--config", $Config, "--prefix", $prefix)
+    $rPush = Invoke-RustDemo @("push-async", "--count", "2", "--config", $Config, "--prefix", $prefix)
+    $cConsume = Invoke-CSharpDemo @("consume", "--count", "2", "--config", $Config, "--prefix", $prefix)
+    Assert-MatchCount $rConsume 'msg-[0-9]{4}' 3 "Rust async consumer did not receive 3 C# queue messages"
+    Assert-MatchCount $cConsume 'msg-[0-9]{4}' 2 "C# consumer did not receive 2 Rust async queue messages"
+}
+
+function Test-ServiceInterop {
+    $deferredPrefixA = "${Prefix}svc-deferred-a:"
+    $deferredPrefixB = "${Prefix}svc-deferred-b:"
+    $statPrefixA = "${Prefix}svc-stat-a:"
+    $statPrefixB = "${Prefix}svc-stat-b:"
+    $eventPrefixA = "${Prefix}svc-event-a:"
+    $eventPrefixB = "${Prefix}svc-event-b:"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $deferredPrefixA) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $deferredPrefixA) | Out-Host
+    Invoke-RustDemo @("deferred-add", "--config", $Config, "--prefix", $deferredPrefixA, "--name", "deferred:demo", "--keys", "a,b,a") | Out-Host
+    $cDeferred = Invoke-CSharpDemo @("deferred-process", "--config", $Config, "--prefix", $deferredPrefixA, "--name", "deferred:demo", "--batch-size", "10", "--timeout", "5")
+    Assert-Text $cDeferred 'processed=2 keys=a,b' "C# deferred process did not receive Rust deferred batch"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $deferredPrefixB) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $deferredPrefixB) | Out-Host
+    Invoke-CSharpDemo @("deferred-add", "--config", $Config, "--prefix", $deferredPrefixB, "--name", "deferred:demo", "--keys", "x,y,x") | Out-Host
+    $rDeferred = Invoke-RustDemo @("deferred-process", "--config", $Config, "--prefix", $deferredPrefixB, "--name", "deferred:demo", "--batch-size", "10")
+    Assert-Text $rDeferred 'processed=2 keys=x,y' "Rust deferred process did not receive C# deferred batch"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $statPrefixA) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $statPrefixA) | Out-Host
+    Invoke-RustDemo @("stat-stage", "--config", $Config, "--prefix", $statPrefixA, "--name", "stat:demo", "--key", "station:1", "--pairs", "pv=2,uv=3", "--delay", "0") | Out-Host
+    $cStat = Invoke-CSharpDemo @("stat-process-once", "--config", $Config, "--prefix", $statPrefixA, "--name", "stat:demo", "--timeout", "5")
+    Assert-Text $cStat 'key=station:1 data=pv=2,uv=3' "C# stat process did not persist Rust stat sample"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $statPrefixB) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $statPrefixB) | Out-Host
+    Invoke-CSharpDemo @("stat-stage", "--config", $Config, "--prefix", $statPrefixB, "--name", "stat:demo", "--key", "station:2", "--pairs", "pv=5,uv=8", "--delay", "0") | Out-Host
+    $rStat = Invoke-RustDemo @("stat-process-once", "--config", $Config, "--prefix", $statPrefixB, "--name", "stat:demo", "--timeout", "5")
+    Assert-Text $rStat 'key=station:2 .*data=pv=5,uv=8' "Rust stat process did not persist C# stat sample"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $eventPrefixA) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $eventPrefixA) | Out-Host
+    $eventRustOut = Join-Path $PWD "target\strict-eventbus-rust.out"
+    $eventRustErr = Join-Path $PWD "target\strict-eventbus-rust.err"
+    $eventRustProc = Start-Subscriber -Exe (Get-RustDemoExe) -CommandArgs @("eventbus-subscribe", "--config", $Config, "--prefix", $eventPrefixA, "--topic", "eventbus:demo", "--group", "demo-rust", "--timeout", "8") -OutFile $eventRustOut -ErrFile $eventRustErr -ReadyPattern 'ready'
+    Invoke-CSharpDemo @("eventbus-publish", "--config", $Config, "--prefix", $eventPrefixA, "--topic", "eventbus:demo", "--group", "demo-rust", "--name", "csharp-event", "--count", "7") | Out-Host
+    $eventRust = Wait-ProcessOutput -Process $eventRustProc -OutFile $eventRustOut -ErrFile $eventRustErr -SuccessPattern 'name=csharp-event count=7' -Name "Rust eventbus subscriber"
+
+    Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $eventPrefixB) | Out-Host
+    Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $eventPrefixB) | Out-Host
+    $eventCSharpOut = Join-Path $PWD "target\strict-eventbus-csharp.out"
+    $eventCSharpErr = Join-Path $PWD "target\strict-eventbus-csharp.err"
+    $eventCSharpProc = Start-Subscriber -Exe (Get-CSharpDemoExe) -CommandArgs @("eventbus-subscribe", "--config", $Config, "--prefix", $eventPrefixB, "--topic", "eventbus:demo", "--group", "demo-csharp", "--timeout", "8") -OutFile $eventCSharpOut -ErrFile $eventCSharpErr -ReadyPattern 'ready'
+    Invoke-RustDemo @("eventbus-publish", "--config", $Config, "--prefix", $eventPrefixB, "--topic", "eventbus:demo", "--group", "demo-csharp", "--name", "rust-event", "--count", "9") | Out-Host
+    $eventCSharp = Wait-ProcessOutput -Process $eventCSharpProc -OutFile $eventCSharpOut -ErrFile $eventCSharpErr -SuccessPattern 'name=rust-event count=9' -Name "C# eventbus subscriber"
+
+    [pscustomobject]@{
+        DeferredRustToCSharp = $cDeferred
+        DeferredCSharpToRust = $rDeferred
+        StatRustToCSharp = $cStat
+        StatCSharpToRust = $rStat
+        EventBusCSharpToRust = $eventRust
+        EventBusRustToCSharp = $eventCSharp
+    }
+}
+
 if (-not $NoBuild) {
     Invoke-Step "Build Rust examples" { cargo build --examples | Out-Host }
     Invoke-Step "Build C# demo" { dotnet build demo\csharp\PekRRedisDemo\PekRRedisDemo.csproj | Out-Host }
@@ -577,6 +680,18 @@ Invoke-Step "Cluster topology interop" {
 
 Invoke-Step "Operational API interop" {
     Test-OperationalInterop
+}
+
+Invoke-Step "TLS transport interop" {
+    Test-TlsInterop
+}
+
+Invoke-Step "Async API interop" {
+    Test-AsyncInterop
+}
+
+Invoke-Step "Service-layer interop" {
+    $null = Test-ServiceInterop
 }
 
 Invoke-Step "Reliable queue bidirectional consume/ack" {

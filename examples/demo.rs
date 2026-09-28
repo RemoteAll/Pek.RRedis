@@ -15,6 +15,10 @@
 //! pubsub-publish / pubsub-subscribe ：跨语言 PubSub（普通/模式/分片）
 //! write-advanced / verify-advanced ：高级 API 面互通（GETEX/BITFIELD/HGETDEL/LMOVE/SMISMEMBER/ZMPOP/FUNCTION 等）
 //! verify-ops / reset-ops / verify-ops-empty ：运维 API 面互通（SLOWLOG/LATENCY）
+//! write-async / verify-async / push-async / consume-async ：tokio 异步包装层跨语言互通
+//! deferred-add / deferred-process ：RedisDeferred 跨语言集合去重与批处理
+//! stat-stage / stat-process-once ：RedisStat 跨语言统计聚合与延迟落盘
+//! eventbus-publish / eventbus-subscribe ：RedisEventBus 跨语言事件发布与订阅
 //! exists：只读探针，检查某个键是否存在（给严格拓扑联调用）
 //! find-slot-key：离线寻找命中指定 Cluster 槽位范围的 key（给严格 cluster 联调用）
 //! set-key：写入任意单键字符串（给严格拓扑/TLS 联调用）
@@ -41,15 +45,20 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::Future;
 use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Builder;
 
 use pek_rredis::encoder::Json;
-use pek_rredis::{FromRedisPayload, FullRedis, ToRedisPayload, hash_slot};
+use pek_rredis::{
+    AsyncFullRedis, FromRedisPayload, FullRedis, RedisDeferred, RedisEventBus, RedisStat,
+    ToRedisPayload, hash_slot,
+};
 
 /// 本侧标识（文件名/进程来源）
 const SIDE: &str = "rust";
@@ -111,9 +120,15 @@ fn run() -> i32 {
         }
     };
     let rds = FullRedis::with_prefix(base.redis().clone(), Some(prefix.clone()));
+    let async_rds = AsyncFullRedis::from_sync(rds.clone());
 
     let mut ctx = DemoCtx {
         rds,
+        prefix: prefix.clone(),
+        failures: Vec::new(),
+    };
+    let mut async_ctx = AsyncDemoCtx {
+        rds: async_rds,
         prefix,
         failures: Vec::new(),
     };
@@ -199,6 +214,52 @@ fn run() -> i32 {
             0
         }
         "verify-advanced" => ctx.verify_advanced(),
+        "deferred-add" => {
+            let name = opt("--name", "deferred:demo");
+            let keys = split_csv(&opt("--keys", ""));
+            ctx.deferred_add(&name, &keys);
+            0
+        }
+        "deferred-process" => {
+            let name = opt("--name", "deferred:demo");
+            let batch_size: usize = opt("--batch-size", "10").parse().unwrap_or(10);
+            ctx.deferred_process(&name, batch_size)
+        }
+        "stat-stage" => {
+            let name = opt("--name", "stat:demo");
+            let key = opt("--key", "station:1");
+            let delay: i64 = opt("--delay", "0").parse().unwrap_or(0);
+            let pairs = parse_pairs_i32(&opt("--pairs", "pv=1"));
+            ctx.stat_stage(&name, &key, &pairs, delay)
+        }
+        "stat-process-once" => {
+            let name = opt("--name", "stat:demo");
+            let timeout: u64 = opt("--timeout", "10").parse().unwrap_or(10);
+            ctx.stat_process_once(&name, timeout)
+        }
+        "eventbus-publish" => {
+            let topic = opt("--topic", "eventbus:demo");
+            let group = opt("--group", "demo");
+            let name = opt("--name", &format!("event-from-{SIDE}"));
+            let count: i32 = opt("--count", "1").parse().unwrap_or(1);
+            ctx.eventbus_publish(&topic, &group, &name, count)
+        }
+        "eventbus-subscribe" => {
+            let topic = opt("--topic", "eventbus:demo");
+            let group = opt("--group", "demo");
+            let timeout: u64 = opt("--timeout", "10").parse().unwrap_or(10);
+            ctx.eventbus_subscribe(&topic, &group, timeout, has_flag("--from-first"))
+        }
+        "write-async" => block_on_i32(async_ctx.write()),
+        "verify-async" => block_on_i32(async_ctx.verify()),
+        "push-async" => {
+            let n: usize = opt("--count", "5").parse().unwrap_or(5);
+            block_on_i32(async_ctx.push(n))
+        }
+        "consume-async" => {
+            let n: usize = opt("--count", "5").parse().unwrap_or(5);
+            block_on_i32(async_ctx.consume(n))
+        }
         "verify-ops" => ctx.verify_ops(),
         "reset-ops" => ctx.reset_ops(),
         "verify-ops-empty" => ctx.verify_ops_empty(),
@@ -229,14 +290,17 @@ fn run() -> i32 {
             code
         }
         other => {
-            println!("未知命令：{other}（可用：selftest/find-slot-key/set-key/write/verify/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
+            println!("未知命令：{other}（可用：selftest/find-slot-key/set-key/write/verify/write-async/verify-async/push-async/consume-async/write-advanced/verify-advanced/verify-ops/reset-ops/verify-ops-empty/deferred-add/deferred-process/stat-stage/stat-process-once/eventbus-publish/eventbus-subscribe/exists/push/consume/qstatus/lock/stream-push/stream-consume/stream-status/delay-push/delay-consume/pubsub-publish/pubsub-subscribe/report/clean/auto）");
             2
         }
     };
 
+    let mut failures = ctx.failures;
+    failures.extend(async_ctx.failures);
+
     if code != 0 {
-        println!("\n结果：失败 {} 项", ctx.failures.len());
-        for f in &ctx.failures {
+        println!("\n结果：失败 {} 项", failures.len());
+        for f in &failures {
             println!("  - {f}");
         }
         return 1;
@@ -270,6 +334,36 @@ fn find_slot_key(prefix: &str, suffix: &str, from: u16, to: u16) -> i32 {
 
     println!("✘ 未找到命中槽位范围 {from}..={to} 的 key");
     2
+}
+
+fn block_on_i32<F>(future: F) -> i32
+where
+    F: Future<Output = i32>,
+{
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+fn split_csv(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_pairs_i32(text: &str) -> Vec<(String, i32)> {
+    split_csv(text)
+        .into_iter()
+        .filter_map(|item| {
+            let (field, value) = item.split_once('=')?;
+            let value = value.trim().parse::<i32>().ok()?;
+            Some((field.trim().to_string(), value))
+        })
+        .collect()
 }
 
 const SAMPLE_STRING: &str = "Hello 互通";
@@ -318,10 +412,225 @@ struct DemoReceipt {
     failures: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "PascalCase")]
+struct ServiceEventDemo {
+    name: String,
+    count: i32,
+}
+
 struct DemoCtx {
     rds: FullRedis,
     prefix: String,
     failures: Vec<String>,
+}
+
+struct AsyncDemoCtx {
+    rds: AsyncFullRedis,
+    prefix: String,
+    failures: Vec<String>,
+}
+
+impl AsyncDemoCtx {
+    fn check(&mut self, ok: bool, what: &str, detail: Option<String>) {
+        match (ok, detail) {
+            (true, _) => println!("  ✔ {what}"),
+            (false, Some(d)) => {
+                println!("  ✘ {what}  {d}");
+                self.failures.push(format!("{what}：{d}"));
+            }
+            (false, None) => {
+                println!("  ✘ {what}");
+                self.failures.push(what.to_string());
+            }
+        }
+    }
+
+    async fn write_receipt(&mut self) {
+        let receipt = DemoReceipt {
+            side: SIDE.into(),
+            time: Local::now().naive_local(),
+            failures: self.failures.clone(),
+        };
+        let key = format!("{SIDE}:receipt");
+        self.rds
+            .set(key.clone(), Json(receipt), 3600)
+            .await
+            .unwrap();
+        println!("  · 已写入回执 {}{key}", self.prefix);
+    }
+
+    async fn write(&mut self) -> i32 {
+        println!("[write-async/{SIDE}] 异步写入固定样本 → prefix={}", self.prefix);
+        self.rds
+            .remove_many(
+                [
+                    "str", "int", "bool", "dt", "json", "hash", "list", "set", "zset", "queue",
+                ]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            )
+            .await
+            .unwrap();
+        self.rds.set("str".into(), SAMPLE_STRING.to_string(), 0).await.unwrap();
+        self.rds.set("int".into(), SAMPLE_INT, 0).await.unwrap();
+        self.rds.set("bool".into(), true, 0).await.unwrap();
+        self.rds.set("dt".into(), sample_time(), 0).await.unwrap();
+        let model = DemoModel {
+            name: SAMPLE_NAME.into(),
+            create_time: sample_json_time(),
+            count: SAMPLE_COUNT,
+        };
+        self.rds.set("json".into(), Json(model), 0).await.unwrap();
+
+        let hash = self.rds.get_hash::<i32>("hash");
+        hash.set("a".to_string(), 1).await.unwrap();
+        hash.set("b".to_string(), 2).await.unwrap();
+
+        let list = self.rds.get_list::<i32>("list");
+        list.push_back_many(vec![1, 2, 3]).await.unwrap();
+
+        self.rds
+            .get_set::<String>("set")
+            .add(vec!["x".into(), "y".into()])
+            .await
+            .unwrap();
+
+        let zset = self.rds.get_sorted_set::<String>("zset");
+        zset.add("m1".to_string(), 1.5).await.unwrap();
+        zset.add("m2".to_string(), 0.5).await.unwrap();
+
+        let queue = self.rds.get_queue::<String>("queue");
+        queue.add("q1".into()).await.unwrap();
+        queue.add("q2".into()).await.unwrap();
+
+        self.rds
+            .set(format!("{SIDE}:marker"), Local::now().naive_local(), 3600)
+            .await
+            .unwrap();
+        println!("  ✔ 已写入：str/int/bool/dt/json/hash/list/set/zset/queue/{SIDE}:marker");
+        0
+    }
+
+    async fn verify(&mut self) -> i32 {
+        println!("[verify-async/{SIDE}] 异步校验固定样本（含对方 {OTHER} 写入的数据）");
+        let mine = self.rds.get_string(format!("{SIDE}:marker")).await.unwrap();
+        let other = self.rds.get_string(format!("{OTHER}:marker")).await.unwrap();
+        println!(
+            "  · 本侧标记：{}；对方 {OTHER} 标记：{}",
+            if mine.is_some() { "有" } else { "无" },
+            other.unwrap_or_else(|| "无（对方尚未运行 write）".into())
+        );
+
+        let str_raw = self.rds.get_string("str".into()).await.unwrap();
+        self.check(str_raw.as_deref() == Some(SAMPLE_STRING), "str 读回", str_raw.clone());
+        let int_val = self.rds.get::<i32>("int".into()).await.unwrap();
+        self.check(int_val == Some(SAMPLE_INT), "int 读回", int_val.map(|v| v.to_string()));
+        let bool_val = self.rds.get::<bool>("bool".into()).await.unwrap();
+        let bool_raw = self.rds.get_string("bool".into()).await.unwrap();
+        self.check(bool_val == Some(true), "bool 读回", bool_val.map(|v| v.to_string()));
+        self.check(bool_raw.as_deref() == Some("True"), "bool 原始字节 = True", bool_raw.clone());
+        let dt_val = self.rds.get::<NaiveDateTime>("dt".into()).await.unwrap();
+        let dt_raw = self.rds.get_string("dt".into()).await.unwrap();
+        self.check(dt_val == Some(sample_time()), "dt 读回", dt_val.map(|v| v.to_string()));
+        self.check(dt_raw.as_deref() == Some("2026-09-26 10:00:00.123"), "dt 原始字节", dt_raw.clone());
+
+        let json_raw = self.rds.get_string("json".into()).await.unwrap();
+        let model = self.rds.get::<Json<DemoModel>>("json".into()).await.unwrap();
+        self.check(
+            model.map(|j| j.0)
+                == Some(DemoModel {
+                    name: SAMPLE_NAME.into(),
+                    create_time: sample_json_time(),
+                    count: SAMPLE_COUNT,
+                }),
+            "json 反序列化",
+            json_raw.clone(),
+        );
+        self.check(
+            json_raw.clone().unwrap_or_default().contains("\"Name\"")
+                && json_raw.clone().unwrap_or_default().contains("\"CreateTime\"")
+                && json_raw.clone().unwrap_or_default().contains("\"Count\""),
+            "json 原始字段名 PascalCase",
+            json_raw.clone(),
+        );
+
+        let hash = self.rds.get_hash::<i32>("hash");
+        let ha = hash.get("a".to_string()).await.unwrap();
+        let hb = hash.get("b".to_string()).await.unwrap();
+        self.check(
+            ha == Some(1) && hb == Some(2),
+            "hash a=1,b=2",
+            Some(format!("{:?},{:?}", ha, hb)),
+        );
+
+        let list = self.rds.get_list::<i32>("list");
+        self.check(list.get_all().await.unwrap() == vec![1, 2, 3], "list [1,2,3]", None);
+
+        let set = self.rds.get_set::<String>("set");
+        let mut members = set.members().await.unwrap();
+        members.sort();
+        self.check(
+            members == vec!["x".to_string(), "y".to_string()],
+            "set {x,y}",
+            Some(format!("{:?}", members)),
+        );
+
+        let zset = self.rds.get_sorted_set::<String>("zset");
+        let m1 = zset.score("m1".to_string()).await.unwrap();
+        let m2 = zset.score("m2".to_string()).await.unwrap();
+        self.check(
+            m1 == Some(1.5) && m2 == Some(0.5),
+            "zset 分数 1.5/0.5",
+            Some(format!("{:?},{:?}", m1, m2)),
+        );
+
+        let queue = self.rds.get_queue::<String>("queue");
+        let q1 = queue.take_one(-1).await.unwrap();
+        let q2 = queue.take_one(-1).await.unwrap();
+        self.check(
+            q1.as_deref() == Some("q1") && q2.as_deref() == Some("q2"),
+            "queue 消费顺序 q1,q2",
+            Some(format!("{:?},{:?}", q1, q2)),
+        );
+        queue.add("q1".into()).await.unwrap();
+        queue.add("q2".into()).await.unwrap();
+
+        self.write_receipt().await;
+        if self.failures.is_empty() { 0 } else { 1 }
+    }
+
+    async fn push(&mut self, count: usize) -> i32 {
+        println!("[push-async/{SIDE}] 异步向可靠队列推入 {count} 条消息");
+        let queue = self.rds.get_reliable_queue::<String>("reliable");
+        for i in 1..=count {
+            queue.add(format!("msg-{i:04}")).await.unwrap();
+        }
+        println!(
+            "  ✔ 队列长度：{}（消息格式 msg-0001 ...）",
+            queue.count().await.unwrap()
+        );
+        0
+    }
+
+    async fn consume(&mut self, count: usize) -> i32 {
+        println!("[consume-async/{SIDE}] 异步用可靠队列消费 {count} 条消息并确认（对方 push 的消息同样可消费）");
+        let queue = self.rds.get_reliable_queue::<String>("reliable");
+        let mut got = 0;
+        for _ in 0..count {
+            match queue.take_one(-1).await.unwrap() {
+                Some(msg) => {
+                    println!("  · 消费到 {msg}（异步确认）");
+                    queue.acknowledge(vec![msg.clone()]).await.unwrap();
+                    got += 1;
+                }
+                None => break,
+            }
+        }
+        println!("  ✔ 已确认 {got} 条；剩余队列长度：{}", queue.count().await.unwrap());
+        0
+    }
 }
 
 impl DemoCtx {
@@ -1083,6 +1392,124 @@ impl DemoCtx {
     fn set_key(&mut self, key: &str, value: &str, expire: i64) {
         self.set(key, value.to_string(), expire).unwrap();
         println!("[set-key/{SIDE}] key={key} value={value} expire={expire}");
+    }
+
+    fn deferred_add(&mut self, name: &str, keys: &[String]) {
+        println!("[deferred-add/{SIDE}] name={name} keys={}", keys.join(","));
+        let deferred = RedisDeferred::new(self.rds.clone(), name);
+        let added = deferred.add(keys.iter().cloned()).unwrap();
+        println!("  ✔ added={added}");
+    }
+
+    fn deferred_process(&mut self, name: &str, batch_size: usize) -> i32 {
+        println!("[deferred-process/{SIDE}] name={name} batch-size={batch_size}");
+        let mut deferred = RedisDeferred::new(self.rds.clone(), name);
+        deferred.batch_size = batch_size;
+
+        let mut got = Vec::new();
+        let processed = deferred
+            .process_once(|keys| {
+                got = keys.to_vec();
+                Ok(())
+            })
+            .unwrap();
+        got.sort();
+        println!("  ✔ processed={processed} keys={}", got.join(","));
+        0
+    }
+
+    fn stat_stage(&mut self, name: &str, key: &str, pairs: &[(String, i32)], delay_seconds: i64) -> i32 {
+        println!(
+            "[stat-stage/{SIDE}] name={name} key={key} delay={delay_seconds}s pairs={}",
+            pairs
+                .iter()
+                .map(|(field, value)| format!("{field}={value}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let stat = RedisStat::new(self.rds.clone(), name).unwrap();
+        for (field, value) in pairs {
+            stat.increment(key, field, *value).unwrap();
+        }
+        let queued = stat.add_delay_queue(key, delay_seconds).unwrap();
+        println!("  ✔ queued={queued}");
+        0
+    }
+
+    fn stat_process_once(&mut self, name: &str, timeout_seconds: u64) -> i32 {
+        println!("[stat-process-once/{SIDE}] name={name} timeout={timeout_seconds}s");
+        let stat = RedisStat::new(self.rds.clone(), name).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            let moved = stat.transfer_due_once(10).unwrap();
+            let mut saved = None;
+            let consumed = stat
+                .consume_once(-1, |key, data| {
+                    saved = Some((key.to_string(), data));
+                    Ok(())
+                })
+                .unwrap();
+            if consumed {
+                let (key, data) = saved.unwrap();
+                let mut items: Vec<(String, i32)> = data.into_iter().collect();
+                items.sort_by(|a, b| a.0.cmp(&b.0));
+                let text = items
+                    .iter()
+                    .map(|(field, value)| format!("{field}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("  ✔ key={key} moved={moved} data={text}");
+                return 0;
+            }
+            if started.elapsed().as_secs() >= timeout_seconds {
+                println!("  ✘ timeout waiting stat save");
+                return 1;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn eventbus_publish(&mut self, topic: &str, group: &str, name: &str, count: i32) -> i32 {
+        println!("[eventbus-publish/{SIDE}] topic={topic} group={group} name={name} count={count}");
+        let bus = RedisEventBus::<ServiceEventDemo>::new(self.rds.clone(), topic, group).unwrap();
+        let id = bus
+            .publish(&ServiceEventDemo {
+                name: name.to_string(),
+                count,
+            })
+            .unwrap();
+        println!("  ✔ id={id}");
+        0
+    }
+
+    fn eventbus_subscribe(&mut self, topic: &str, group: &str, timeout_seconds: u64, from_first: bool) -> i32 {
+        println!("[eventbus-subscribe/{SIDE}] topic={topic} group={group} timeout={timeout_seconds}s");
+        let bus = RedisEventBus::<ServiceEventDemo>::new(self.rds.clone(), topic, group).unwrap();
+        if from_first {
+            bus.set_from_last_offset(false);
+        }
+        println!("  · ready");
+
+        let started = std::time::Instant::now();
+        loop {
+            let mut seen = None;
+            let processed = bus
+                .consume_once(|event, message| {
+                    seen = Some((event.clone(), message.id.clone()));
+                    Ok(())
+                })
+                .unwrap();
+            if processed {
+                let (event, id) = seen.unwrap();
+                println!("  ✔ id={id} name={} count={}", event.name, event.count);
+                return 0;
+            }
+            if started.elapsed().as_secs() >= timeout_seconds {
+                println!("  ✘ timeout waiting event");
+                return 1;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     // ---------------- PubSub ----------------
