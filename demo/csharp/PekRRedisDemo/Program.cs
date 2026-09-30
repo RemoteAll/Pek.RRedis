@@ -705,6 +705,10 @@ Int32 DeferredProcess(FullRedis rds, String name, Int32 batchSize, Int32 timeout
 Int32 StatStage(FullRedis rds, String name, String key, IList<KeyValuePair<String, Int32>> pairs, Int32 delay)
 {
     Console.WriteLine($"[stat-stage/{Side}] name={name} key={key} delay={delay}s pairs={String.Join(',', pairs.Select(e => $"{e.Key}={e.Value}"))}");
+
+    // 注意：AddDelayQueue 会启动后台转移大循环（把到期消息从 {name}:Delay 搬进主队列），
+    // 而本演示进程紧接着退出，后台线程存在被杀死在 ZREM→LPUSH 之间的竞态（实测约 1/3 概率丢消息）。
+    // 因此调用方应使用足够大的 delay（>0，保证本进程存活期内消息不到期），让转移确定性地发生在消费者侧。
     using var stat = new RedisStat(rds, name) { OnSave = (_, _) => { } };
     foreach (var item in pairs) stat.Increment(key, item.Key, item.Value);
     stat.AddDelayQueue(key, delay);
@@ -721,6 +725,21 @@ async Task<Int32> StatProcessOnce(FullRedis rds, String name, Int32 timeoutSecon
     {
         OnSave = (key, data) => done.TrySetResult((key, new Dictionary<String, Int32>(data)))
     };
+
+    // 消费者主动驱动延迟转移：对方可能只把消息写进延迟队列（{name}:Delay），
+    // 需要转移到主队列后才能被本进程消费者取到（消费大循环只消费主队列）。
+    // C# 后台大循环按 TransferInterval（默认 10 秒）节拍扫描，这里显式驱动保持联调实时性；
+    // 与后台循环的 ZREM 争夺安全，语义同 Rust 侧 transfer_due_once。
+    var sub = (FullRedis)rds.CreateSub(rds.Db + 1);
+    var delayQ = new RedisDelayQueue<String>(sub, $"{name}:Delay");
+    var mainQ = sub.GetReliableQueue<String>(name);
+    var watch = System.Diagnostics.Stopwatch.StartNew();
+    while (!done.Task.IsCompleted && watch.Elapsed < TimeSpan.FromSeconds(timeoutSeconds))
+    {
+        foreach (var m in delayQ.Take(10)) mainQ.Add(m);
+        if (done.Task.IsCompleted) break;
+        Thread.Sleep(50);
+    }
 
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
     try

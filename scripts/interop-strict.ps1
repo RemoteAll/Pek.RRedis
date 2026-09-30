@@ -595,13 +595,15 @@ function Test-ServiceInterop {
 
     Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $statPrefixA) | Out-Host
     Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $statPrefixA) | Out-Host
-    Invoke-RustDemo @("stat-stage", "--config", $Config, "--prefix", $statPrefixA, "--name", "stat:demo", "--key", "station:1", "--pairs", "pv=2,uv=3", "--delay", "0") | Out-Host
+    # delay 必须 >0：生产进程暂存后立即退出，若消息在其存活期内到期，后台转移线程与进程退出存在
+    # ZREM→LPUSH 竞态（实测会丢消息）；给足延迟让转移确定性地发生在消费者侧（消费者会显式驱动转移）。
+    Invoke-RustDemo @("stat-stage", "--config", $Config, "--prefix", $statPrefixA, "--name", "stat:demo", "--key", "station:1", "--pairs", "pv=2,uv=3", "--delay", "2") | Out-Host
     $cStat = Invoke-CSharpDemo @("stat-process-once", "--config", $Config, "--prefix", $statPrefixA, "--name", "stat:demo", "--timeout", "5")
     Assert-Text $cStat 'key=station:1 data=pv=2,uv=3' "C# stat process did not persist Rust stat sample"
 
     Invoke-RustDemo @("clean", "--config", $Config, "--prefix", $statPrefixB) | Out-Host
     Invoke-CSharpDemo @("clean", "--config", $Config, "--prefix", $statPrefixB) | Out-Host
-    Invoke-CSharpDemo @("stat-stage", "--config", $Config, "--prefix", $statPrefixB, "--name", "stat:demo", "--key", "station:2", "--pairs", "pv=5,uv=8", "--delay", "0") | Out-Host
+    Invoke-CSharpDemo @("stat-stage", "--config", $Config, "--prefix", $statPrefixB, "--name", "stat:demo", "--key", "station:2", "--pairs", "pv=5,uv=8", "--delay", "2") | Out-Host
     $rStat = Invoke-RustDemo @("stat-process-once", "--config", $Config, "--prefix", $statPrefixB, "--name", "stat:demo", "--timeout", "5")
     Assert-Text $rStat 'key=station:2 .*data=pv=5,uv=8' "Rust stat process did not persist C# stat sample"
 
