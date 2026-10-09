@@ -82,12 +82,14 @@ impl FromRedisPayload for RedisQueueStatus {
     }
 }
 
-/// 本机名（与 C# `Environment.MachineName` 对应）。
+/// 本机名（与 C# `Environment.MachineName` 对应；取值链下沉 `dhrust::sys::machine`，含内核主机名）。
 pub fn machine_name() -> Option<String> {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .filter(|s| !s.is_empty())
+    let name = dhrust::sys::machine::hostname();
+    if name.trim().is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// 当前用户名（与 C# `Environment.UserName` 对应）。
